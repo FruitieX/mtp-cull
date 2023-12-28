@@ -1,0 +1,26 @@
+[package]
+name = "mtp-cull"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+chrono = "0.4.31"
+clap = { version = "4.4.11", features = ["derive"] }
+color-eyre = "0.6.2"
+eyre = "0.6.11"
+humantime = "2.1.0"
+log = "0.4.20"
+pretty_env_logger = "0.5.0"
+size = "0.4.1"
+widestring = "1.0.2"
+windows = { version = "0.52.0", features = [
+    "Win32_System_Com",
+    "Win32_Devices_PortableDevices",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_Foundation",
+]}
+winmtp = { path = "../winmtp" }
