@@ -70,9 +70,10 @@ pub struct CopyArgs {
     pub target_path: String,
 
     /// "Album name" i.e. directory name that will be created in the target paths.
+    /// Automatically prepended by the date. Defaults to just the date.
     ///
     /// Example: "New Years Eve"
-    pub album_name: String,
+    pub album_name: Option<String>,
 }
 
 pub fn parse_args() -> Cli {

@@ -67,11 +67,16 @@ pub fn copy_files(args: &CopyArgs) -> Result<()> {
     let total_files = files.len();
 
     for file in files {
+        let album_name = if let Some(album_name) = &args.album_name {
+            format!("{} {}", &date.format("%Y-%m-%d"), &album_name)
+        } else {
+            format!("{}", &date.format("%Y-%m-%d"))
+        };
         let out_path = [
             args.target_path.clone(),
             file.file_type.out_path_segment().to_string(),
             date.format("%Y").to_string(),
-            format!("{} {}", &date.format("%Y-%m-%d"), &args.album_name),
+            album_name,
             file.name.clone(),
         ]
         .to_vec()
