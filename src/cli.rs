@@ -63,11 +63,23 @@ pub struct CopyArgs {
     #[clap(long)]
     pub date: Option<NaiveDate>,
 
-    /// Prefix for path that will be copied to.
+    /// Prefix for path that pictures will be copied to.
     ///
-    /// Example: /home/user/Pictures
+    /// Example: C:/Users/user/Pictures
     #[clap(long, short)]
-    pub target_path: String,
+    pub pictures_path: String,
+
+    /// Prefix for path that videos will be copied to.
+    ///
+    /// Example: C:/Users/user/Videos
+    #[clap(long, short)]
+    pub videos_path: String,
+
+    /// Prefix for path that raw files will be copied to.
+    ///
+    /// Example: X:/Archive/Undeveloped photos
+    #[clap(long, short)]
+    pub raw_path: String,
 
     /// "Album name" i.e. directory name that will be created in the target paths.
     /// Automatically prepended by the date. Defaults to just the date.

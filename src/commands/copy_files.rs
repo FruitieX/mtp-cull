@@ -1,4 +1,8 @@
-use crate::{cli::CopyArgs, mtp::get_files_list, mtp_file::MtpFile};
+use crate::{
+    cli::CopyArgs,
+    mtp::get_files_list,
+    mtp_file::{MtpFile, MtpFileType},
+};
 use color_eyre::Result;
 use humantime::format_duration;
 use size::Size;
@@ -55,7 +59,7 @@ pub fn copy_files(args: &CopyArgs) -> Result<()> {
 
     info!(
         "Copying files to {target_path}",
-        target_path = args.target_path
+        target_path = args.pictures_path
     );
     let total_original_size_bytes = files.iter().map(|file| file.size.bytes()).sum::<i64>();
     let mut total_size_bytes = total_original_size_bytes;
@@ -72,9 +76,15 @@ pub fn copy_files(args: &CopyArgs) -> Result<()> {
         } else {
             format!("{}", &date.format("%Y-%m-%d"))
         };
+
+        let prefix = match file.file_type {
+            MtpFileType::Image => &args.pictures_path,
+            MtpFileType::RawImage => &args.raw_path,
+            MtpFileType::Video => &args.videos_path,
+        };
+
         let out_path = [
-            args.target_path.clone(),
-            file.file_type.out_path_segment().to_string(),
+            prefix.to_string(),
             date.format("%Y").to_string(),
             album_name,
             file.name.clone(),

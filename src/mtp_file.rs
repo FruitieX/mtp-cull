@@ -32,14 +32,6 @@ impl MtpFileType {
             Self::Video => 2,
         }
     }
-
-    pub fn out_path_segment(&self) -> &str {
-        match self {
-            Self::Image => "Out-of-camera",
-            Self::RawImage => "Undeveloped",
-            Self::Video => "Video",
-        }
-    }
 }
 
 impl Display for MtpFileType {
