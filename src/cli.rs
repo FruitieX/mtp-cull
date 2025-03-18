@@ -86,6 +86,10 @@ pub struct CopyArgs {
     ///
     /// Example: "New Years Eve"
     pub album_name: Option<String>,
+
+    /// Continue copying files even if some fail
+    #[clap(long, short, default_value = "false")]
+    pub keep_going: bool,
 }
 
 pub fn parse_args() -> Cli {

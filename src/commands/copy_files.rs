@@ -68,6 +68,7 @@ pub fn copy_files(args: &CopyArgs) -> Result<()> {
     let mut copied_size_bytes = 0;
     let mut copied_files = 0;
     let mut skipped_files = 0;
+    let mut errored_files = vec![];
     let total_files = files.len();
 
     for file in files {
@@ -106,16 +107,26 @@ pub fn copy_files(args: &CopyArgs) -> Result<()> {
         };
         let progress_str = format!("{progress:.2}% ETA: {eta}");
 
-        let result = copy_file(&file, &out_path, Some(progress_str))?;
+        let result = copy_file(&file, &out_path, Some(progress_str));
 
         match result {
-            CopyFileResult::Copied => {
+            Ok(CopyFileResult::Copied) => {
                 copied_size_bytes += file.size.bytes();
                 copied_files += 1;
             }
-            CopyFileResult::Skipped => {
+            Ok(CopyFileResult::Skipped) => {
                 total_size_bytes -= file.size.bytes();
                 skipped_files += 1;
+            }
+            Err(e) => {
+                total_size_bytes -= file.size.bytes();
+                errored_files.push(file.name.clone());
+
+                if args.keep_going {
+                    error!("Error copying file {name}: {e}", name = file.name);
+                } else {
+                    return Err(e);
+                }
             }
         }
     }
@@ -131,6 +142,13 @@ pub fn copy_files(args: &CopyArgs) -> Result<()> {
         "Effective speed: {speed}/s",
         speed = Size::from_bytes(copied_size_bytes / start_time.elapsed().as_secs() as i64)
     );
+
+    if !errored_files.is_empty() {
+        println!("The following files failed to copy:");
+        for file in errored_files {
+            println!("{}", file);
+        }
+    }
 
     Ok(())
 }

@@ -51,10 +51,8 @@ pub fn get_mtp_files_recursive(obj: Object, parent_path: Option<String>) -> Resu
             name.to_string()
         };
 
-        let properties =
-            child.get_object_properties(&[WPD_OBJECT_SIZE, WPD_OBJECT_DATE_AUTHORED])?;
-        let object_size =
-            unsafe { properties.GetUnsignedLargeIntegerValue(&WPD_OBJECT_SIZE as *const _) };
+        let properties = child.properties(&[WPD_OBJECT_SIZE, WPD_OBJECT_DATE_AUTHORED])?;
+        let object_size = properties.get_u32(&WPD_OBJECT_SIZE);
 
         let file_type = MtpFileType::try_from_file_name(&name);
 
