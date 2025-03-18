@@ -24,3 +24,18 @@ windows = { version = "0.52.0", features = [
     "Win32_Foundation",
 ] }
 winmtp = "0.3.0"
+
+
+native-windows-gui = "1.0.12"
+native-windows-derive = "1.0.3"
+egui = { git = "https://github.com/emilk/egui", branch = "emilk/update-image" }
+egui_extras = { git = "https://github.com/emilk/egui", branch = "emilk/update-image", features = [
+    "image",
+    "file",
+] }
+image = { version = "0.25.0", features = ["jpeg"] }
+eframe = { git = "https://github.com/emilk/egui", branch = "emilk/update-image" }
+rfd = "0.12.1"
+
+[build-dependencies]
+embed-resource = "1.8"

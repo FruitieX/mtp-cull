@@ -27,6 +27,9 @@ pub enum Commands {
     /// - {year} is computed from the <DATE> argument.
     /// - {file_name} is the original filename.
     Copy(CopyArgs),
+
+    /// Opens a GUI
+    Ui,
 }
 
 #[derive(Args, Debug)]
