@@ -28,8 +28,8 @@ impl MtpFileType {
     pub fn copy_order(&self) -> usize {
         match self {
             Self::Image => 0,
-            Self::RawImage => 1,
-            Self::Video => 2,
+            Self::Video => 1,
+            Self::RawImage => 2,
         }
     }
 }
