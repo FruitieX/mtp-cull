@@ -2,6 +2,7 @@ use blake3::Hash;
 use chrono::{NaiveDate, NaiveDateTime};
 use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use directories::ProjectDirs;
+use eframe::egui;
 use exif::{DateTime as ExifDateTime, In, Reader, Tag, Value};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::BTreeMap;
@@ -81,6 +82,7 @@ pub struct Asset {
     pub capture_time: Option<NaiveDateTime>,
     pub orientation: Option<u16>,
     pub sharpness: Option<f64>,
+    pub similarity_hash: Option<u64>,
     fingerprint: Hash,
 }
 
@@ -95,6 +97,28 @@ pub struct Shot {
     pub stem: String,
     pub assets: Vec<Asset>,
     pub decision: Decision,
+    pub burst: Option<BurstMembership>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BurstMembership {
+    pub id: u32,
+    pub distance_to_previous: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BurstSettings {
+    pub window_seconds: f64,
+    pub similarity_threshold: u32,
+}
+
+impl Default for BurstSettings {
+    fn default() -> Self {
+        Self {
+            window_seconds: 2.0,
+            similarity_threshold: 8,
+        }
+    }
 }
 
 impl Shot {
@@ -231,15 +255,23 @@ impl Database {
                 action TEXT PRIMARY KEY NOT NULL,
                 key_name TEXT NOT NULL
             ) STRICT;
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            ) STRICT;
             CREATE TABLE IF NOT EXISTS analysis (
                 fingerprint BLOB PRIMARY KEY NOT NULL,
                 capture_at TEXT,
                 orientation INTEGER,
                 sharpness REAL,
+                similarity INTEGER,
                 algorithm TEXT NOT NULL
             ) STRICT;
             ",
         )?;
+        if !has_column(&connection, "analysis", "similarity")? {
+            connection.execute("ALTER TABLE analysis ADD COLUMN similarity INTEGER", [])?;
+        }
         Ok(connection)
     }
 
@@ -315,10 +347,46 @@ impl Database {
         Ok(())
     }
 
+    pub fn burst_settings(&self) -> Result<BurstSettings> {
+        let connection = self.connection()?;
+        let window_seconds = setting_value(&connection, "burst_window_seconds")?
+            .and_then(|value| value.parse().ok())
+            .filter(|value: &f64| (0.1..=60.0).contains(value))
+            .unwrap_or_else(|| BurstSettings::default().window_seconds);
+        let similarity_threshold = setting_value(&connection, "burst_similarity_threshold")?
+            .and_then(|value| value.parse().ok())
+            .filter(|value: &u32| *value <= 64)
+            .unwrap_or_else(|| BurstSettings::default().similarity_threshold);
+        Ok(BurstSettings {
+            window_seconds,
+            similarity_threshold,
+        })
+    }
+
+    pub fn set_burst_settings(&self, settings: BurstSettings) -> Result<()> {
+        let connection = self.connection()?;
+        for (key, value) in [
+            ("burst_window_seconds", settings.window_seconds.to_string()),
+            (
+                "burst_similarity_threshold",
+                settings.similarity_threshold.to_string(),
+            ),
+        ] {
+            connection.execute(
+                "
+                INSERT INTO settings (key, value) VALUES (?1, ?2)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                ",
+                params![key, value],
+            )?;
+        }
+        Ok(())
+    }
+
     fn analysis_for(&self, fingerprint: Hash) -> Result<Option<Analysis>> {
         self.connection()?
             .query_row(
-                "SELECT capture_at, orientation, sharpness FROM analysis WHERE fingerprint = ?1 AND algorithm = 'exif-v1-tenengrad-v1'",
+                "SELECT capture_at, orientation, sharpness, similarity FROM analysis WHERE fingerprint = ?1 AND algorithm = 'exif-v1-tenengrad-v1'",
                 [fingerprint.as_bytes()],
                 |row| {
                     let capture_at = row.get::<_, Option<String>>(0)?;
@@ -331,6 +399,7 @@ impl Database {
                         capture_time,
                         orientation: row.get::<_, Option<u16>>(1)?,
                         sharpness: row.get::<_, Option<f64>>(2)?,
+                        similarity_hash: row.get::<_, Option<i64>>(3)?.map(|hash| hash as u64),
                     })
                 },
             )
@@ -341,12 +410,13 @@ impl Database {
     fn store_analysis(&self, fingerprint: Hash, analysis: &Analysis) -> Result<()> {
         self.connection()?.execute(
             "
-            INSERT INTO analysis (fingerprint, capture_at, orientation, sharpness, algorithm)
-            VALUES (?1, ?2, ?3, ?4, 'exif-v1-tenengrad-v1')
+            INSERT INTO analysis (fingerprint, capture_at, orientation, sharpness, similarity, algorithm)
+            VALUES (?1, ?2, ?3, ?4, ?5, 'exif-v1-tenengrad-v1')
             ON CONFLICT(fingerprint) DO UPDATE SET
                 capture_at = excluded.capture_at,
                 orientation = excluded.orientation,
                 sharpness = excluded.sharpness,
+                similarity = excluded.similarity,
                 algorithm = excluded.algorithm
             ",
             params![
@@ -356,6 +426,7 @@ impl Database {
                     .map(|time| time.format("%Y-%m-%dT%H:%M:%S").to_string()),
                 analysis.orientation,
                 analysis.sharpness,
+                analysis.similarity_hash.map(|hash| hash as i64),
             ],
         )?;
         Ok(())
@@ -366,6 +437,7 @@ struct Analysis {
     capture_time: Option<NaiveDateTime>,
     orientation: Option<u16>,
     sharpness: Option<f64>,
+    similarity_hash: Option<u64>,
 }
 
 pub fn load_session(
@@ -421,6 +493,7 @@ pub fn load_session(
                     capture_time: analysis.capture_time,
                     orientation: analysis.orientation,
                     sharpness: analysis.sharpness,
+                    similarity_hash: analysis.similarity_hash,
                     path,
                     kind,
                     fingerprint,
@@ -432,15 +505,67 @@ pub fn load_session(
             stem,
             assets,
             decision,
+            burst: None,
         });
     }
     sort_by_capture_time(&mut shots);
+    apply_burst_groups(&mut shots, BurstSettings::default());
 
     Ok(Session {
         primary_directory,
         raw_directory,
         shots,
     })
+}
+
+pub fn apply_burst_groups(shots: &mut [Shot], settings: BurstSettings) {
+    let mut next_burst_id = 1;
+    for shot in &mut *shots {
+        shot.burst = None;
+    }
+    for index in 1..shots.len() {
+        let previous = &shots[index - 1];
+        let current = &shots[index];
+        let Some(previous_time) = previous.capture_time() else {
+            continue;
+        };
+        let Some(current_time) = current.capture_time() else {
+            continue;
+        };
+        let Some(previous_hash) = previous.jpeg().and_then(|asset| asset.similarity_hash) else {
+            continue;
+        };
+        let Some(current_hash) = current.jpeg().and_then(|asset| asset.similarity_hash) else {
+            continue;
+        };
+        let elapsed = current_time
+            .signed_duration_since(previous_time)
+            .num_milliseconds()
+            .abs() as f64
+            / 1_000.0;
+        let distance = (current_hash ^ previous_hash).count_ones();
+        if elapsed > settings.window_seconds || distance > settings.similarity_threshold {
+            continue;
+        }
+        let id = previous.burst.map_or_else(
+            || {
+                let id = next_burst_id;
+                next_burst_id += 1;
+                id
+            },
+            |membership| membership.id,
+        );
+        if shots[index - 1].burst.is_none() {
+            shots[index - 1].burst = Some(BurstMembership {
+                id,
+                distance_to_previous: 0,
+            });
+        }
+        shots[index].burst = Some(BurstMembership {
+            id,
+            distance_to_previous: distance,
+        });
+    }
 }
 
 pub fn sort_by_capture_time(shots: &mut [Shot]) {
@@ -487,12 +612,14 @@ fn fingerprint_file(path: &Path) -> Result<Hash> {
 
 fn analyze(path: &Path, kind: MediaKind) -> Analysis {
     let (capture_time, orientation) = exif_metadata(path).unwrap_or((None, None));
+    let jpeg_analysis = (kind == MediaKind::Jpeg)
+        .then(|| analyze_jpeg(path, orientation).ok())
+        .flatten();
     Analysis {
         capture_time,
         orientation,
-        sharpness: (kind == MediaKind::Jpeg)
-            .then(|| sharpness_score(path).ok())
-            .flatten(),
+        sharpness: jpeg_analysis.map(|analysis| analysis.0),
+        similarity_hash: jpeg_analysis.map(|analysis| analysis.1),
     }
 }
 
@@ -530,13 +657,30 @@ fn exif_datetime_to_chrono(datetime: ExifDateTime) -> Option<NaiveDateTime> {
     )
 }
 
-fn sharpness_score(path: &Path) -> Result<f64> {
-    let image = image::ImageReader::open(path)?.decode()?;
+pub fn decode_jpeg_preview(
+    path: &Path,
+    orientation: Option<u16>,
+    max_edge: Option<u32>,
+) -> Result<egui::ColorImage> {
+    let image = decode_jpeg(path, orientation)?;
+    let image = match max_edge {
+        Some(edge) => image.thumbnail(edge, edge),
+        None => image,
+    };
+    let rgba = image.into_rgba8();
+    Ok(egui::ColorImage::from_rgba_unmultiplied(
+        [rgba.width() as usize, rgba.height() as usize],
+        rgba.as_raw(),
+    ))
+}
+
+fn analyze_jpeg(path: &Path, orientation: Option<u16>) -> Result<(f64, u64)> {
+    let image = decode_jpeg(path, orientation)?;
     let grayscale = image.thumbnail(1_024, 1_024).to_luma8();
     let width = grayscale.width();
     let height = grayscale.height();
     if width < 3 || height < 3 {
-        return Ok(0.0);
+        return Ok((0.0, difference_hash(&image)));
     }
 
     let mut energy = 0.0;
@@ -549,13 +693,69 @@ fn sharpness_score(path: &Path) -> Result<f64> {
             energy += (right - left).mul_add(right - left, (bottom - top) * (bottom - top));
         }
     }
-    Ok(energy / ((width - 2) * (height - 2)) as f64)
+    Ok((
+        energy / ((width - 2) * (height - 2)) as f64,
+        difference_hash(&image),
+    ))
+}
+
+fn decode_jpeg(path: &Path, orientation: Option<u16>) -> Result<image::DynamicImage> {
+    use image::ImageDecoder;
+
+    let mut decoder = image::ImageReader::open(path)?.into_decoder()?;
+    let embedded_orientation = decoder.orientation()?;
+    let mut image = image::DynamicImage::from_decoder(decoder)?;
+    if let Some(orientation) = orientation
+        .and_then(|value| u8::try_from(value).ok())
+        .and_then(image::metadata::Orientation::from_exif)
+    {
+        image.apply_orientation(orientation);
+    } else {
+        image.apply_orientation(embedded_orientation);
+    }
+    Ok(image)
+}
+
+fn difference_hash(image: &image::DynamicImage) -> u64 {
+    let grayscale = image.thumbnail_exact(9, 8).into_luma8();
+    let mut hash = 0_u64;
+    for y in 0..8 {
+        for x in 0..8 {
+            hash = (hash << 1)
+                | u64::from(grayscale.get_pixel(x, y)[0] > grayscale.get_pixel(x + 1, y)[0]);
+        }
+    }
+    hash
+}
+
+fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for name in columns {
+        if name? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn setting_value(connection: &Connection, key: &str) -> Result<Option<String>> {
+    connection
+        .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(Into::into)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Analysis, Database, Decision, MediaKind, load_session};
-    use chrono::NaiveDate;
+    use super::{
+        Analysis, Asset, BurstSettings, Database, Decision, MediaKind, Shot, apply_burst_groups,
+        decode_jpeg_preview, load_session,
+    };
+    use chrono::{NaiveDate, NaiveDateTime};
+    use image::{DynamicImage, ImageBuffer, ImageFormat, Rgb};
     use std::fs;
 
     #[test]
@@ -607,6 +807,7 @@ mod tests {
                     capture_time: Some(capture_time),
                     orientation: Some(6),
                     sharpness: Some(123.4),
+                    similarity_hash: Some(42),
                 },
             )
             .unwrap();
@@ -615,5 +816,61 @@ mod tests {
         assert_eq!(analysis.capture_time, Some(capture_time));
         assert_eq!(analysis.orientation, Some(6));
         assert_eq!(analysis.sharpness, Some(123.4));
+    }
+
+    #[test]
+    fn applies_exif_orientation_to_preview_pixels() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("portrait.jpg");
+        let image = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(2, 3, Rgb([10, 20, 30])));
+        image.save_with_format(&path, ImageFormat::Jpeg).unwrap();
+
+        let preview = decode_jpeg_preview(&path, Some(6), None).unwrap();
+
+        assert_eq!(preview.size, [3, 2]);
+    }
+
+    #[test]
+    fn groups_only_similar_adjacent_shots_inside_the_time_window() {
+        let capture = NaiveDate::from_ymd_opt(2026, 7, 11)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        let mut shots = vec![
+            shot_with_hash("one", capture, 0),
+            shot_with_hash("two", capture + chrono::Duration::seconds(1), 0b11),
+            shot_with_hash("three", capture + chrono::Duration::seconds(2), u64::MAX),
+            shot_with_hash("four", capture + chrono::Duration::seconds(10), 0),
+        ];
+
+        apply_burst_groups(
+            &mut shots,
+            BurstSettings {
+                window_seconds: 2.0,
+                similarity_threshold: 3,
+            },
+        );
+
+        assert_eq!(shots[0].burst.unwrap().id, shots[1].burst.unwrap().id);
+        assert_eq!(shots[1].burst.unwrap().distance_to_previous, 2);
+        assert!(shots[2].burst.is_none());
+        assert!(shots[3].burst.is_none());
+    }
+
+    fn shot_with_hash(stem: &str, capture_time: NaiveDateTime, similarity_hash: u64) -> Shot {
+        Shot {
+            stem: stem.to_owned(),
+            assets: vec![Asset {
+                path: stem.into(),
+                kind: MediaKind::Jpeg,
+                capture_time: Some(capture_time),
+                orientation: None,
+                sharpness: None,
+                similarity_hash: Some(similarity_hash),
+                fingerprint: blake3::hash(stem.as_bytes()),
+            }],
+            decision: Decision::Unrated,
+            burst: None,
+        }
     }
 }

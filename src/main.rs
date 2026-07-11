@@ -3,6 +3,8 @@ mod commands;
 mod culling;
 mod mtp;
 mod mtp_file;
+mod mtp_worker;
+mod safe_copy;
 mod ui;
 
 fn main() -> color_eyre::eyre::Result<()> {

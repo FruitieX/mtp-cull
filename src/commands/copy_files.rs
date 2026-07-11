@@ -2,14 +2,13 @@ use crate::{
     cli::CopyArgs,
     mtp::get_files_list,
     mtp_file::{MtpFile, MtpFileType},
+    safe_copy::{CopyOutcome, copy_reader_no_clobber},
 };
-use color_eyre::eyre::{Result, WrapErr, bail, eyre};
+use color_eyre::eyre::{Result, bail};
 use humantime::format_duration;
 use log::{error, info, warn};
 use size::Size;
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufReader, Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -18,79 +17,22 @@ enum CopyFileResult {
     Skipped,
 }
 
-fn files_equal(left: &mut File, right: &mut File) -> Result<bool> {
-    left.rewind()?;
-    right.rewind()?;
-    let mut left = BufReader::new(left);
-    let mut right = BufReader::new(right);
-    let mut left_buffer = [0_u8; 64 * 1024];
-    let mut right_buffer = [0_u8; 64 * 1024];
-
-    loop {
-        let left_count = left.read(&mut left_buffer)?;
-        let right_count = right.read(&mut right_buffer)?;
-        if left_count != right_count || left_buffer[..left_count] != right_buffer[..right_count] {
-            return Ok(false);
-        }
-        if left_count == 0 {
-            return Ok(true);
-        }
-    }
-}
-
 fn copy_file(file: &MtpFile, target_path: &Path, progress: &str) -> Result<CopyFileResult> {
-    let dirname = target_path
-        .parent()
-        .ok_or_else(|| eyre!("no parent directory for {}", target_path.display()))?;
-    std::fs::create_dir_all(dirname)
-        .wrap_err_with(|| format!("failed to create {}", dirname.display()))?;
-
-    if target_path.try_exists()? && target_path.metadata()?.len() != file.size {
-        bail!(
-            "{} already exists with different content; refusing to overwrite it",
-            target_path.display()
-        );
-    }
-
     info!(
         "({progress}) Copying {file} to {}...",
         target_path.display()
     );
-    let mut temporary = tempfile::NamedTempFile::new_in(dirname)
-        .wrap_err_with(|| format!("failed to create a temporary file in {}", dirname.display()))?;
     let mut input = file.open()?;
-    let copied = std::io::copy(&mut input, temporary.as_file_mut())?;
-    temporary.as_file_mut().flush()?;
-
-    if copied != file.size {
-        bail!(
-            "incomplete transfer for {}: expected {} bytes but received {copied}",
-            file.path,
-            file.size
-        );
-    }
-
-    if target_path.try_exists()? {
-        let mut target = File::open(target_path)?;
-        if files_equal(temporary.as_file_mut(), &mut target)? {
+    match copy_reader_no_clobber(&mut input, file.size, target_path, &file.path)? {
+        CopyOutcome::Copied => Ok(CopyFileResult::Copied),
+        CopyOutcome::SkippedExisting => {
             warn!(
                 "{} already exists with identical content, skipping",
                 target_path.display()
             );
-            return Ok(CopyFileResult::Skipped);
+            Ok(CopyFileResult::Skipped)
         }
-        bail!(
-            "{} already exists with different content; refusing to overwrite it",
-            target_path.display()
-        );
     }
-
-    temporary.as_file_mut().sync_all()?;
-    temporary
-        .persist_noclobber(target_path)
-        .map_err(|error| error.error)
-        .wrap_err_with(|| format!("failed to finalize {}", target_path.display()))?;
-    Ok(CopyFileResult::Copied)
 }
 
 fn single_path_component(value: &str, description: &str) -> Result<()> {

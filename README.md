@@ -27,7 +27,7 @@ The `ui` command opens a local culling session. Select an album folder, then opt
 - Sharpness is a background Tenengrad-style score for JPEG companions. It is only a sortable hint, never an automatic decision.
 - Rejections are applied only from an explicit review screen. Every affected file is re-fingerprinted before it is sent to the platform recycle bin/trash.
 
-The planned direct-on-camera workflow is documented in [`docs/direct-mtp-culling.md`](docs/direct-mtp-culling.md). It will cache only JPEG companions temporarily and import explicit Keep pairs without deleting anything from the device.
+On Windows, `ui` also supports direct MTP culling: choose a device and source folder, cull temporary cached JPEG companions, then import only explicit Keep pairs. Device files are never deleted; rejected and unrated files remain on the device. The worker design and verification constraints are documented in [`docs/direct-mtp-culling.md`](docs/direct-mtp-culling.md).
 
 ## Development
 
