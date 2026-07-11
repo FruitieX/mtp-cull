@@ -17,6 +17,16 @@ The command-line MTP backend currently works on Windows. The application and med
 - [ ] Optionally delete the files from the MTP device after copying
 - [ ] Upload the resulting album to Google Photos
 
+## Local culling
+
+The `ui` command opens a local culling session. Select an album folder, then optionally choose a separate RAW folder. Files are paired by exact filename stem, so `DSCF0001.JPG` and `DSCF0001.RAF` receive one decision and are recycled together.
+
+- Decisions are stored in the platform's per-user application-data SQLite database by BLAKE3 content fingerprint, so they survive album moves and renames.
+- JPEG companions are used for fast preview. RAF, DNG, HEIF, and videos remain included in pairing and decisions; their native preview backends are not implemented yet.
+- `1` rejects, `2` keeps, and `0` clears the decision. These and navigation, fit/100%, and A/B shortcuts are configurable in the UI.
+- Sharpness is a background Tenengrad-style score for JPEG companions. It is only a sortable hint, never an automatic decision.
+- Rejections are applied only from an explicit review screen. Every affected file is re-fingerprinted before it is sent to the platform recycle bin/trash.
+
 ## Development
 
 The repository pins its tested Rust toolchain. Run the standard checks with:

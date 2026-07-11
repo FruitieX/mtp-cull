@@ -5,9 +5,11 @@ edition = "2024"
 rust-version = "1.97"
 
 [dependencies]
+blake3 = "1.8.5"
 chrono = "0.4.45"
 clap = { version = "4.6.1", features = ["derive"] }
 color-eyre = "0.6.5"
+directories = "6.0.0"
 eframe = "0.35.0"
 egui_extras = { version = "0.35.0", features = [
     "image",
@@ -18,8 +20,10 @@ humantime = "2.4.0"
 image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 log = "0.4.33"
 rfd = "0.17.2"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 size = "0.5.0"
 tempfile = "3.23.0"
+trash = "5.2.6"
 url = "2.5.7"
 
 [target.'cfg(windows)'.dependencies]
