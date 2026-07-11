@@ -16,6 +16,7 @@ egui_extras = { version = "0.35.0", features = [
     "file",
 ] }
 env_logger = "0.11.11"
+kamadak-exif = "0.6.1"
 humantime = "2.4.0"
 image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
 log = "0.4.33"

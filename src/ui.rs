@@ -1,4 +1,6 @@
-use crate::culling::{Action, Database, Decision, Session, Shot, apply_rejects, load_session};
+use crate::culling::{
+    Action, Database, Decision, Session, Shot, apply_rejects, load_session, sort_by_capture_time,
+};
 use color_eyre::eyre::Result;
 use eframe::egui;
 use std::collections::BTreeMap;
@@ -205,10 +207,8 @@ impl MyApp {
             });
             self.notice = Some("Sorted by JPEG sharpness score".to_owned());
         } else {
-            session
-                .shots
-                .sort_by(|left, right| left.stem.cmp(&right.stem));
-            self.notice = Some("Sorted by filename".to_owned());
+            sort_by_capture_time(&mut session.shots);
+            self.notice = Some("Sorted by capture time".to_owned());
         }
         self.selected = 0;
         self.zoom = None;
@@ -250,7 +250,7 @@ impl MyApp {
                 .add_enabled(
                     self.session.is_some(),
                     egui::Button::new(if self.sort_by_sharpness {
-                        "Sort by filename"
+                        "Sort by capture time"
                     } else {
                         "Sort by sharpness"
                     }),
@@ -394,6 +394,15 @@ impl MyApp {
             }
             if let Some(sharpness) = shot.sharpness() {
                 ui.label(format!("Sharpness: {sharpness:.0}"));
+            }
+            if let Some(capture_time) = shot.capture_time() {
+                ui.label(format!(
+                    "Captured: {}",
+                    capture_time.format("%Y-%m-%d %H:%M:%S")
+                ));
+            }
+            if let Some(orientation) = shot.jpeg().and_then(|asset| asset.orientation) {
+                ui.label(format!("Orientation: {orientation}"));
             }
         });
         ui.label(

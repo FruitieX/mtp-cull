@@ -1,6 +1,8 @@
 use blake3::Hash;
+use chrono::{NaiveDate, NaiveDateTime};
 use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use directories::ProjectDirs;
+use exif::{DateTime as ExifDateTime, In, Reader, Tag, Value};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -76,6 +78,8 @@ impl MediaKind {
 pub struct Asset {
     pub path: PathBuf,
     pub kind: MediaKind,
+    pub capture_time: Option<NaiveDateTime>,
+    pub orientation: Option<u16>,
     pub sharpness: Option<f64>,
     fingerprint: Hash,
 }
@@ -116,6 +120,10 @@ impl Shot {
 
     pub fn sharpness(&self) -> Option<f64> {
         self.jpeg().and_then(|asset| asset.sharpness)
+    }
+
+    pub fn capture_time(&self) -> Option<NaiveDateTime> {
+        self.assets.iter().find_map(|asset| asset.capture_time)
     }
 }
 
@@ -223,6 +231,13 @@ impl Database {
                 action TEXT PRIMARY KEY NOT NULL,
                 key_name TEXT NOT NULL
             ) STRICT;
+            CREATE TABLE IF NOT EXISTS analysis (
+                fingerprint BLOB PRIMARY KEY NOT NULL,
+                capture_at TEXT,
+                orientation INTEGER,
+                sharpness REAL,
+                algorithm TEXT NOT NULL
+            ) STRICT;
             ",
         )?;
         Ok(connection)
@@ -299,6 +314,58 @@ impl Database {
         )?;
         Ok(())
     }
+
+    fn analysis_for(&self, fingerprint: Hash) -> Result<Option<Analysis>> {
+        self.connection()?
+            .query_row(
+                "SELECT capture_at, orientation, sharpness FROM analysis WHERE fingerprint = ?1 AND algorithm = 'exif-v1-tenengrad-v1'",
+                [fingerprint.as_bytes()],
+                |row| {
+                    let capture_at = row.get::<_, Option<String>>(0)?;
+                    let capture_time = capture_at
+                        .as_deref()
+                        .map(|value| NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S"))
+                        .transpose()
+                        .map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?;
+                    Ok(Analysis {
+                        capture_time,
+                        orientation: row.get::<_, Option<u16>>(1)?,
+                        sharpness: row.get::<_, Option<f64>>(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn store_analysis(&self, fingerprint: Hash, analysis: &Analysis) -> Result<()> {
+        self.connection()?.execute(
+            "
+            INSERT INTO analysis (fingerprint, capture_at, orientation, sharpness, algorithm)
+            VALUES (?1, ?2, ?3, ?4, 'exif-v1-tenengrad-v1')
+            ON CONFLICT(fingerprint) DO UPDATE SET
+                capture_at = excluded.capture_at,
+                orientation = excluded.orientation,
+                sharpness = excluded.sharpness,
+                algorithm = excluded.algorithm
+            ",
+            params![
+                fingerprint.as_bytes(),
+                analysis
+                    .capture_time
+                    .map(|time| time.format("%Y-%m-%dT%H:%M:%S").to_string()),
+                analysis.orientation,
+                analysis.sharpness,
+            ],
+        )?;
+        Ok(())
+    }
+}
+
+struct Analysis {
+    capture_time: Option<NaiveDateTime>,
+    orientation: Option<u16>,
+    sharpness: Option<f64>,
 }
 
 pub fn load_session(
@@ -342,10 +409,18 @@ pub fn load_session(
             .into_iter()
             .map(|(path, kind)| {
                 let fingerprint = fingerprint_file(&path)?;
+                let analysis = match database.analysis_for(fingerprint)? {
+                    Some(analysis) => analysis,
+                    None => {
+                        let analysis = analyze(&path, kind);
+                        database.store_analysis(fingerprint, &analysis)?;
+                        analysis
+                    }
+                };
                 Ok(Asset {
-                    sharpness: (kind == MediaKind::Jpeg)
-                        .then(|| sharpness_score(&path).ok())
-                        .flatten(),
+                    capture_time: analysis.capture_time,
+                    orientation: analysis.orientation,
+                    sharpness: analysis.sharpness,
                     path,
                     kind,
                     fingerprint,
@@ -359,12 +434,26 @@ pub fn load_session(
             decision,
         });
     }
+    sort_by_capture_time(&mut shots);
 
     Ok(Session {
         primary_directory,
         raw_directory,
         shots,
     })
+}
+
+pub fn sort_by_capture_time(shots: &mut [Shot]) {
+    shots.sort_by(
+        |left, right| match (left.capture_time(), right.capture_time()) {
+            (Some(left_time), Some(right_time)) => {
+                left_time.cmp(&right_time).then(left.stem.cmp(&right.stem))
+            }
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => left.stem.cmp(&right.stem),
+        },
+    );
 }
 
 pub fn apply_rejects(session: &Session) -> Result<usize> {
@@ -396,6 +485,51 @@ fn fingerprint_file(path: &Path) -> Result<Hash> {
     Ok(hasher.finalize())
 }
 
+fn analyze(path: &Path, kind: MediaKind) -> Analysis {
+    let (capture_time, orientation) = exif_metadata(path).unwrap_or((None, None));
+    Analysis {
+        capture_time,
+        orientation,
+        sharpness: (kind == MediaKind::Jpeg)
+            .then(|| sharpness_score(path).ok())
+            .flatten(),
+    }
+}
+
+fn exif_metadata(path: &Path) -> Result<(Option<NaiveDateTime>, Option<u16>)> {
+    let file = File::open(path)?;
+    let exif = Reader::new().read_from_container(&mut std::io::BufReader::new(file))?;
+    let capture_time = [Tag::DateTimeOriginal, Tag::DateTimeDigitized, Tag::DateTime]
+        .into_iter()
+        .find_map(|tag| exif.get_field(tag, In::PRIMARY))
+        .and_then(|field| match &field.value {
+            Value::Ascii(values) => values.first(),
+            _ => None,
+        })
+        .and_then(|value| ExifDateTime::from_ascii(value).ok())
+        .and_then(exif_datetime_to_chrono);
+    let orientation = exif
+        .get_field(Tag::Orientation, In::PRIMARY)
+        .and_then(|field| field.value.get_uint(0))
+        .and_then(|value| u16::try_from(value).ok())
+        .filter(|value| (1..=8).contains(value));
+    Ok((capture_time, orientation))
+}
+
+fn exif_datetime_to_chrono(datetime: ExifDateTime) -> Option<NaiveDateTime> {
+    NaiveDate::from_ymd_opt(
+        datetime.year.into(),
+        datetime.month.into(),
+        datetime.day.into(),
+    )?
+    .and_hms_nano_opt(
+        datetime.hour.into(),
+        datetime.minute.into(),
+        datetime.second.into(),
+        datetime.nanosecond.unwrap_or(0),
+    )
+}
+
 fn sharpness_score(path: &Path) -> Result<f64> {
     let image = image::ImageReader::open(path)?.decode()?;
     let grayscale = image.thumbnail(1_024, 1_024).to_luma8();
@@ -420,7 +554,8 @@ fn sharpness_score(path: &Path) -> Result<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Database, Decision, MediaKind, load_session};
+    use super::{Analysis, Database, Decision, MediaKind, load_session};
+    use chrono::NaiveDate;
     use std::fs;
 
     #[test]
@@ -453,5 +588,32 @@ mod tests {
 
         let reloaded = load_session(&database, directory.path().to_owned(), None).unwrap();
         assert_eq!(reloaded.shots[0].decision, Decision::Keep);
+    }
+
+    #[test]
+    fn persists_capture_metadata_and_sharpness_by_fingerprint() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = Database::at(directory.path().join("cull.sqlite3")).unwrap();
+        let fingerprint = blake3::hash(b"photo");
+        let capture_time = NaiveDate::from_ymd_opt(2026, 7, 11)
+            .unwrap()
+            .and_hms_opt(12, 30, 45)
+            .unwrap();
+
+        database
+            .store_analysis(
+                fingerprint,
+                &Analysis {
+                    capture_time: Some(capture_time),
+                    orientation: Some(6),
+                    sharpness: Some(123.4),
+                },
+            )
+            .unwrap();
+        let analysis = database.analysis_for(fingerprint).unwrap().unwrap();
+
+        assert_eq!(analysis.capture_time, Some(capture_time));
+        assert_eq!(analysis.orientation, Some(6));
+        assert_eq!(analysis.sharpness, Some(123.4));
     }
 }
