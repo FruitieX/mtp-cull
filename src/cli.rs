@@ -1,7 +1,7 @@
 use chrono::NaiveDate;
 use clap::{Args, Parser, Subcommand};
 
-/// Simple program to greet a person
+/// Fast, safe photo backup and culling
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
@@ -56,7 +56,7 @@ pub struct CopyArgs {
     ///
     /// Defaults to device root.
     ///
-    /// Example: /DCIM/Camera
+    /// Example: DCIM/Camera
     #[clap(long, short, verbatim_doc_comment)]
     pub source_path: Option<String>,
 

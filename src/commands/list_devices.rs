@@ -1,13 +1,13 @@
-use winmtp::Provider;
+use color_eyre::Result;
 
-pub fn list_devices() {
-    let provider = Provider::new().unwrap();
-    let devices = provider.enumerate_devices().unwrap();
-
+pub fn list_devices() -> Result<()> {
+    let devices = crate::mtp::list_devices()?;
     let count = devices.len();
     println!("Found {count} MTP devices:");
 
     for device in devices {
-        println!("{}", device.friendly_name());
+        println!("{device}");
     }
+
+    Ok(())
 }

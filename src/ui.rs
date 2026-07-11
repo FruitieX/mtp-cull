@@ -1,7 +1,6 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
-
 use color_eyre::Result;
 use eframe::egui;
+use std::path::PathBuf;
 
 pub fn init() -> Result<()> {
     let options = eframe::NativeOptions {
@@ -12,115 +11,120 @@ pub fn init() -> Result<()> {
         env!("CARGO_PKG_NAME"),
         options,
         Box::new(|cc| {
-            // This gives us image support:
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Box::<MyApp>::default()
+            Ok(Box::<MyApp>::default())
         }),
-    )
-    .unwrap();
-
+    )?;
     Ok(())
 }
 
 #[derive(Default)]
 struct MyApp {
-    picked_dir: Option<String>,
+    picked_dir: Option<PathBuf>,
     picked_index: usize,
-    dir_images: Vec<DirImage>,
+    dir_images: Vec<PathBuf>,
+    error: Option<String>,
 }
 
-#[derive(Clone)]
-struct DirImage {
-    path: String,
+impl MyApp {
+    fn select_directory(&mut self, path: PathBuf) {
+        self.picked_index = 0;
+        self.picked_dir = Some(path.clone());
+        self.error = None;
+
+        match std::fs::read_dir(&path) {
+            Ok(entries) => {
+                self.dir_images = entries
+                    .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                    .filter(|path| {
+                        path.extension()
+                            .and_then(|extension| extension.to_str())
+                            .is_some_and(|extension| {
+                                extension.eq_ignore_ascii_case("jpg")
+                                    || extension.eq_ignore_ascii_case("jpeg")
+                            })
+                    })
+                    .collect();
+                self.dir_images.sort();
+            }
+            Err(error) => {
+                self.dir_images.clear();
+                self.error = Some(format!("Could not read {}: {error}", path.display()));
+            }
+        }
+    }
+
+    fn handle_navigation(&mut self, ui: &egui::Ui) {
+        let (next, previous) = ui.input(|input| {
+            (
+                input.key_pressed(egui::Key::ArrowRight) || input.key_pressed(egui::Key::ArrowDown),
+                input.key_pressed(egui::Key::ArrowLeft) || input.key_pressed(egui::Key::ArrowUp),
+            )
+        });
+        if next && self.picked_index + 1 < self.dir_images.len() {
+            self.picked_index += 1;
+        }
+        if previous && self.picked_index > 0 {
+            self.picked_index -= 1;
+        }
+    }
 }
 
 impl eframe::App for MyApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let picked_file = self.dir_images.get(self.picked_index).cloned();
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.handle_navigation(ui);
 
-        egui::SidePanel::right("panel").show(ctx, |ui| {
-            if ui.button("Select directory").clicked() {
-                if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                    self.picked_index = 0;
-                    self.picked_dir = Some(path.display().to_string());
-                    let paths = std::fs::read_dir(path).unwrap();
-                    self.dir_images = paths
-                        .into_iter()
-                        .map(|p| {
-                            let path = p.unwrap().path();
-                            let path_str = path.display().to_string();
-
-                            DirImage {
-                                path: path_str.clone(),
-                            }
-                        })
-                        .collect();
-                }
-            }
-            if let Some(picked_dir) = &self.picked_dir {
-                ui.label("Picked directory:");
-                ui.monospace(picked_dir);
+        egui::Panel::right("browser").show(ui, |ui| {
+            if ui.button("Select directory").clicked()
+                && let Some(path) = rfd::FileDialog::new().pick_folder()
+            {
+                self.select_directory(path);
             }
 
-            if let Some(picked_file) = &picked_file {
-                ui.label("Picked file:");
-                ui.monospace(&picked_file.path);
+            if let Some(directory) = &self.picked_dir {
+                ui.label("Directory");
+                ui.monospace(directory.display().to_string());
             }
-
+            if let Some(error) = &self.error {
+                ui.colored_label(egui::Color32::LIGHT_RED, error);
+            }
             ui.separator();
 
             egui::ScrollArea::vertical().show_rows(
                 ui,
-                50.,
+                24.0,
                 self.dir_images.len(),
                 |ui, row_range| {
-                    for image in &self.dir_images.as_slice()[row_range] {
-                        let label = ui.button(&image.path);
-
-                        if label.clicked() {
-                            let index = self
-                                .dir_images
-                                .iter()
-                                .position(|i| i.path == image.path)
-                                .unwrap();
-
+                    for index in row_range {
+                        let path = &self.dir_images[index];
+                        let label = path
+                            .file_name()
+                            .map(|name| name.to_string_lossy())
+                            .unwrap_or_else(|| path.as_os_str().to_string_lossy());
+                        if ui
+                            .selectable_label(index == self.picked_index, label)
+                            .clicked()
+                        {
                             self.picked_index = index;
                         }
-
-                        // if self.dir_images[*self.picked_file] == Some(&image.path) {
-                        //     label.highlight();
-                        // }
                     }
                 },
             );
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.input(|i| {
-                let next_pressed =
-                    i.key_pressed(egui::Key::ArrowRight) || i.key_pressed(egui::Key::ArrowDown);
-
-                let prev_pressed =
-                    i.key_pressed(egui::Key::ArrowLeft) || i.key_pressed(egui::Key::ArrowUp);
-
-                if next_pressed && self.picked_index < self.dir_images.len() {
-                    let index = self.picked_index + 1;
-                    self.picked_index = index;
+        egui::CentralPanel::default().show(ui, |ui| {
+            if let Some(path) = self.dir_images.get(self.picked_index) {
+                ui.label(path.display().to_string());
+                if let Ok(uri) = url::Url::from_file_path(path) {
+                    let image = egui::Image::from_uri(uri.as_str())
+                        .shrink_to_fit()
+                        .maintain_aspect_ratio(true);
+                    ui.centered_and_justified(|ui| ui.add(image));
+                } else {
+                    ui.colored_label(egui::Color32::LIGHT_RED, "Invalid image path");
                 }
-
-                if prev_pressed && self.picked_index > 0 {
-                    let index = self.picked_index - 1;
-                    self.picked_index = index;
-                }
-            });
-
-            if let Some(picked_file) = &picked_file {
-                let path = &picked_file.path;
-                let uri = format!("file://{path}");
-                let image = egui::Image::new(uri)
-                    .shrink_to_fit()
-                    .maintain_aspect_ratio(true);
-                ui.centered_and_justified(|ui| ui.add(image));
+            } else {
+                ui.centered_and_justified(|ui| ui.label("Select a directory of JPEG images"));
             }
         });
     }

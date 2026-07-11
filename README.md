@@ -1,6 +1,8 @@
 # mtp-cull
 
-This is a program that aims to automate as much as possible of my photo backup routine:
+This program aims to automate as much as possible of a fast, safe photo backup and culling routine.
+
+The command-line MTP backend currently works on Windows. The application and media-source boundary compile on Windows, Linux, and macOS so platform MTP backends can be added without coupling the culling UI to one protocol implementation.
 
 - [x] List all files under some given path on an MTP device
 - [x] Copy the files to a location such as `X:/Pictures/Out-of-camera/2023/2023-12-28 Album name/DSCF1234.JPG` where:
@@ -15,4 +17,12 @@ This is a program that aims to automate as much as possible of my photo backup r
 - [ ] Optionally delete the files from the MTP device after copying
 - [ ] Upload the resulting album to Google Photos
 
-Windows only due to the MTP crate I'm using only supporting Windows. Porting to Linux may be possible in the future.
+## Development
+
+The repository pins its tested Rust toolchain. Run the standard checks with:
+
+```console
+cargo fmt --all -- --check
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
+```
