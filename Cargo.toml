@@ -29,3 +29,7 @@ url = "2.5.7"
 
 [target.'cfg(windows)'.dependencies]
 winmtp = "0.3.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+futures = "0.3"
+mtp-rs = "=0.23.0"

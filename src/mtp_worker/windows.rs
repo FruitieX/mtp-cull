@@ -70,7 +70,7 @@ struct PrivateSession {
     _device: Device,
     public: RemoteSession,
     objects: HashMap<String, Object>,
-    preview_paths: Vec<PathBuf>,
+    cache_directory: PathBuf,
 }
 
 impl WorkerState {
@@ -107,7 +107,9 @@ impl WorkerState {
             } => {
                 let session = self.scan_session(device_id, source_folder_id)?;
                 let public = session.public.clone();
-                self.session = Some(session);
+                if let Some(previous) = self.session.replace(session) {
+                    remove_preview_cache(&previous);
+                }
                 Ok(MtpEvent::SessionScanned(public))
             }
             MtpRequest::ImportKept {
@@ -187,16 +189,9 @@ impl WorkerState {
             .wrap_err("failed to access MTP device root")?;
         let source = find_container(root, &source_folder_id)?
             .ok_or_else(|| eyre!("MTP source folder {source_folder_id:?} no longer exists"))?;
-        let cache_directory = preview_cache_directory()?;
+        let cache_directory = create_preview_cache_directory()?;
         let mut grouped = BTreeMap::<String, Vec<(RemoteAsset, Object)>>::new();
-        let mut preview_paths = Vec::new();
-        collect_media(
-            source,
-            &device_id,
-            &cache_directory,
-            &mut grouped,
-            &mut preview_paths,
-        )?;
+        collect_media(source, &device_id, &cache_directory, &mut grouped)?;
 
         let mut objects = HashMap::new();
         let mut shots = Vec::with_capacity(grouped.len());
@@ -227,7 +222,7 @@ impl WorkerState {
                 shots,
             },
             objects,
-            preview_paths,
+            cache_directory,
         })
     }
 
@@ -271,16 +266,7 @@ impl WorkerState {
         }
 
         // A failed or partial import deliberately leaves previews available for retry.
-        for path in &session.preview_paths {
-            if let Err(error) = std::fs::remove_file(path)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                warn!(
-                    "failed to remove MTP preview cache {}: {error}",
-                    path.display()
-                );
-            }
-        }
+        remove_preview_cache(session);
         self.session = None;
         Ok(MtpEvent::ImportFinished {
             copied,
@@ -354,14 +340,13 @@ fn collect_media(
     device_id: &str,
     cache_directory: &std::path::Path,
     grouped: &mut BTreeMap<String, Vec<(RemoteAsset, Object)>>,
-    preview_paths: &mut Vec<PathBuf>,
 ) -> Result<()> {
     for child in container
         .children()
         .wrap_err("failed to enumerate MTP media")?
     {
         if is_container(&child) {
-            collect_media(child, device_id, cache_directory, grouped, preview_paths)?;
+            collect_media(child, device_id, cache_directory, grouped)?;
             continue;
         }
         if !child.object_type().is_file_like() {
@@ -383,7 +368,6 @@ fn collect_media(
                 .open_read_stream()
                 .wrap_err_with(|| format!("failed to read JPEG companion {name}"))?;
             copy_reader_no_clobber(&mut input, size, &path, &name)?;
-            preview_paths.push(path.clone());
             Some(path)
         } else {
             None
@@ -402,13 +386,28 @@ fn collect_media(
     Ok(())
 }
 
-fn preview_cache_directory() -> Result<PathBuf> {
+fn create_preview_cache_directory() -> Result<PathBuf> {
     let directories = ProjectDirs::from("com", "fruit", "mtp-cull")
         .ok_or_else(|| eyre!("could not determine the local application data directory"))?;
-    let directory = directories.data_local_dir().join("mtp-preview-cache");
-    std::fs::create_dir_all(&directory)
-        .wrap_err_with(|| format!("failed to create {}", directory.display()))?;
-    Ok(directory)
+    let root = directories.data_local_dir().join("mtp-preview-cache");
+    std::fs::create_dir_all(&root)
+        .wrap_err_with(|| format!("failed to create {}", root.display()))?;
+    Ok(tempfile::Builder::new()
+        .prefix("session-")
+        .tempdir_in(root)
+        .wrap_err("failed to create an MTP preview session cache")?
+        .keep())
+}
+
+fn remove_preview_cache(session: &PrivateSession) {
+    if let Err(error) = std::fs::remove_dir_all(&session.cache_directory)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(
+            "failed to remove MTP preview cache {}: {error}",
+            session.cache_directory.display()
+        );
+    }
 }
 
 fn cache_path(directory: &std::path::Path, device_id: &str, object_id: &str) -> PathBuf {

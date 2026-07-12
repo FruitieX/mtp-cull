@@ -1,19 +1,23 @@
 mod planning;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(not(any(windows, target_os = "linux")))]
 mod unsupported;
 #[cfg(windows)]
 mod windows;
 
 use std::path::PathBuf;
 
+#[cfg(target_os = "linux")]
+pub use linux::MtpWorker;
 pub use planning::{ImportPaths, MtpMediaKind};
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 pub use unsupported::MtpWorker;
 #[cfg(windows)]
 pub use windows::MtpWorker;
 
-/// Stable Windows Portable Device identifier, not a user-visible friendly name.
+/// Opaque backend device locator, not a user-visible friendly name.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MtpDevice {
     pub id: String,

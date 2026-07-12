@@ -4,6 +4,8 @@ This program aims to automate as much as possible of a fast, safe photo backup a
 
 The command-line MTP backend currently works on Windows. The application and media-source boundary compile on Windows, Linux, and macOS so platform MTP backends can be added without coupling the culling UI to one protocol implementation.
 
+The direct culling UI supports Windows and Linux MTP-mode devices. Linux setup, permissions, and limits are documented in [`docs/linux.md`](docs/linux.md).
+
 - [x] List all files under some given path on an MTP device
 - [x] Copy the files to a location such as `X:/Pictures/Out-of-camera/2023/2023-12-28 Album name/DSCF1234.JPG` where:
 

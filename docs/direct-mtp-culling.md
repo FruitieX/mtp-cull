@@ -1,6 +1,6 @@
 # Direct MTP Culling
 
-The Windows implementation preserves the local workflow's safety properties while keeping all device I/O off the UI thread. Linux/macOS backends can implement the same worker contract later.
+The Windows and Linux implementations preserve the local workflow's safety properties while keeping all device I/O off the UI thread. macOS remains unsupported.
 
 ## Workflow
 
