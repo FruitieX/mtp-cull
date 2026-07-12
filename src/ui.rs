@@ -3,7 +3,8 @@ use crate::culling::{
     decode_jpeg_preview, load_session, sort_by_capture_time,
 };
 use crate::mtp_worker::{
-    ImportPaths, MtpDevice, MtpEvent, MtpRequest, MtpWorker, RemoteSession, SourceFolder,
+    ImportPaths, MtpDevice, MtpEvent, MtpProgress, MtpRequest, MtpWorker, RemoteSession,
+    SourceFolder,
 };
 use chrono::{Local, NaiveDate};
 use color_eyre::eyre::Result;
@@ -110,6 +111,8 @@ struct MyApp {
     show_keep_all_confirmation: bool,
     error: Option<String>,
     notice: Option<String>,
+    mtp_progress: Option<MtpProgress>,
+    mtp_operation: Option<&'static str>,
 }
 
 impl MyApp {
@@ -148,10 +151,21 @@ impl MyApp {
             show_keep_all_confirmation: false,
             error: None,
             notice: None,
+            mtp_progress: None,
+            mtp_operation: None,
         })
     }
 
     fn begin_loading(&mut self, primary_directory: PathBuf, raw_directory: Option<PathBuf>) {
+        if let Some(operation) = self.mtp_operation {
+            self.error = Some(format!(
+                "Wait for MTP {operation} to finish or cancel it before opening a local album"
+            ));
+            return;
+        }
+        if self.direct_session.is_some() {
+            let _ = self.send_mtp_request(MtpRequest::CloseSession, "close session");
+        }
         let database = self.database.clone();
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
@@ -205,12 +219,45 @@ impl MyApp {
                 }
             }
         }
-        if let Some(worker) = &self.mtp_worker
-            && let Err(error) = worker.send(MtpRequest::ListDevices)
-        {
-            self.error = Some(format!("Could not list MTP devices: {error:#}"));
+        if self.send_mtp_request(MtpRequest::ListDevices, "list devices") {
+            self.show_mtp_picker = true;
         }
-        self.show_mtp_picker = true;
+    }
+
+    fn send_mtp_request(&mut self, request: MtpRequest, operation: &'static str) -> bool {
+        if let Some(active) = self.mtp_operation {
+            self.error = Some(format!(
+                "Wait for MTP {active} to finish or cancel it before starting {operation}"
+            ));
+            return false;
+        }
+        let result = self.mtp_worker.as_ref().map_or_else(
+            || Err(color_eyre::eyre::eyre!("direct MTP worker is not running")),
+            |worker| worker.send(request),
+        );
+        match result {
+            Ok(()) => {
+                self.mtp_operation = Some(operation);
+                self.mtp_progress = None;
+                true
+            }
+            Err(error) => {
+                self.error = Some(format!("Could not start MTP {operation}: {error:#}"));
+                false
+            }
+        }
+    }
+
+    fn cancel_mtp_operation(&mut self) {
+        if let Some(worker) = &self.mtp_worker
+            && let Err(error) = worker.send(MtpRequest::Cancel)
+        {
+            self.error = Some(format!("Could not cancel MTP operation: {error:#}"));
+        } else {
+            self.notice = Some(
+                "Cancellation requested; waiting for the device operation to stop...".to_owned(),
+            );
+        }
     }
 
     fn poll_mtp_worker(&mut self) {
@@ -222,14 +269,28 @@ impl MyApp {
         }
         for event in events {
             match event {
-                MtpEvent::Devices(devices) => self.mtp_devices = devices,
+                MtpEvent::Progress(progress) => {
+                    self.mtp_operation = Some(progress.operation);
+                    self.mtp_progress = Some(progress);
+                }
+                MtpEvent::Devices(devices) => {
+                    self.mtp_devices = devices;
+                    self.mtp_progress = None;
+                    self.mtp_operation = None;
+                }
                 MtpEvent::SourceFolders { device_id, folders } => {
+                    self.mtp_progress = None;
+                    self.mtp_operation = None;
                     if self.selected_mtp_device.as_deref() == Some(&device_id) {
                         self.selected_mtp_folder = folders.first().map(|folder| folder.id.clone());
                         self.mtp_folders = folders;
                     }
                 }
-                MtpEvent::SessionScanned(session) => self.start_direct_session(session),
+                MtpEvent::SessionScanned(session) => {
+                    self.mtp_progress = None;
+                    self.mtp_operation = None;
+                    self.start_direct_session(session);
+                }
                 MtpEvent::ImportFinished {
                     copied,
                     skipped_existing,
@@ -240,10 +301,29 @@ impl MyApp {
                     self.direct_session = None;
                     self.preview_cache.clear();
                     self.preview_pending.clear();
+                    self.mtp_progress = None;
+                    self.mtp_operation = None;
+                }
+                MtpEvent::SessionClosed => {
+                    self.direct_session = None;
+                    self.preview_cache.clear();
+                    self.preview_pending.clear();
+                    self.mtp_progress = None;
+                    self.mtp_operation = None;
+                    self.notice =
+                        Some("Closed the MTP session and removed its preview cache".to_owned());
+                }
+                MtpEvent::Cancelled { operation } => {
+                    self.mtp_progress = None;
+                    self.mtp_operation = None;
+                    self.notice = Some(format!("Cancelled MTP {operation}"));
                 }
                 MtpEvent::Error { operation, message } => {
+                    self.mtp_progress = None;
+                    self.mtp_operation = None;
                     self.error = Some(format!("MTP {operation} failed: {message}"));
                 }
+                MtpEvent::FilesListed(_) | MtpEvent::CopyFinished(_) => {}
             }
         }
     }
@@ -541,13 +621,25 @@ impl MyApp {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let mut decision = None;
+        let mut close_mtp = false;
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Open album").clicked()
+            if ui
+                .add_enabled(
+                    self.mtp_operation.is_none(),
+                    egui::Button::new("Open album"),
+                )
+                .clicked()
                 && let Some(path) = rfd::FileDialog::new().pick_folder()
             {
                 self.begin_loading(path, None);
             }
-            if ui.button("Cull MTP device").clicked() {
+            if ui
+                .add_enabled(
+                    self.mtp_operation.is_none(),
+                    egui::Button::new("Cull MTP device"),
+                )
+                .clicked()
+            {
                 self.open_mtp_picker();
             }
             if ui
@@ -581,6 +673,15 @@ impl MyApp {
                 .clicked()
             {
                 self.show_import_review = true;
+            }
+            if ui
+                .add_enabled(
+                    self.direct_session.is_some() && self.mtp_operation.is_none(),
+                    egui::Button::new("Close MTP session"),
+                )
+                .clicked()
+            {
+                close_mtp = true;
             }
             if ui
                 .add_enabled(
@@ -682,6 +783,12 @@ impl MyApp {
         });
         if let Some(decision) = decision {
             self.set_decision(decision);
+        }
+        if close_mtp {
+            self.send_mtp_request(MtpRequest::CloseSession, "close session");
+            self.direct_session = None;
+            self.preview_cache.clear();
+            self.preview_pending.clear();
         }
     }
 
@@ -1018,23 +1125,21 @@ impl MyApp {
             self.selected_mtp_device = Some(device_id.clone());
             self.selected_mtp_folder = None;
             self.mtp_folders.clear();
-            if let Some(worker) = &self.mtp_worker
-                && let Err(error) = worker.send(MtpRequest::ListSourceFolders { device_id })
-            {
-                self.error = Some(format!("Could not list MTP folders: {error:#}"));
-            }
+            self.send_mtp_request(
+                MtpRequest::ListSourceFolders { device_id },
+                "list source folders",
+            );
         }
-        if let Some((device_id, source_folder_id)) = start {
-            if let Some(worker) = &self.mtp_worker
-                && let Err(error) = worker.send(MtpRequest::StartSession {
+        if let Some((device_id, source_folder_id)) = start
+            && self.send_mtp_request(
+                MtpRequest::StartSession {
                     device_id,
                     source_folder_id,
-                })
-            {
-                self.error = Some(format!("Could not start MTP culling: {error:#}"));
-            } else {
-                self.notice = Some("Caching JPEG previews from the MTP device...".to_owned());
-            }
+                },
+                "scan session",
+            )
+        {
+            self.notice = Some("Caching JPEG previews from the MTP device...".to_owned());
         }
         self.show_mtp_picker = open;
     }
@@ -1084,14 +1189,13 @@ impl MyApp {
                         .filter(|shot| shot.decision == Decision::Keep)
                         .map(|shot| shot.id.clone())
                         .collect();
-                    if let Some(worker) = &self.mtp_worker
-                        && let Err(error) = worker.send(MtpRequest::ImportKept {
+                    if self.send_mtp_request(
+                        MtpRequest::ImportKept {
                             shot_ids,
                             destinations,
-                        })
-                    {
-                        self.error = Some(format!("Could not import MTP files: {error:#}"));
-                    } else {
+                        },
+                        "import kept shots",
+                    ) {
                         self.notice = Some("Importing explicit Keep shots...".to_owned());
                         open = false;
                     }
@@ -1251,10 +1355,35 @@ impl eframe::App for MyApp {
             .default_size(280.0)
             .show(ui, |ui| self.shot_list(ui));
         egui::CentralPanel::default().show(ui, |ui| self.image_viewer(ui));
+        let mut cancel_mtp = false;
         egui::Panel::bottom("status").show(ui, |ui| {
             if self.loading.is_some() {
                 ui.spinner();
                 ui.label("Scanning, pairing, and fingerprinting files in the background...");
+            }
+            if let Some(progress) = &self.mtp_progress {
+                ui.horizontal(|ui| {
+                    if let Some(total) = progress.total.filter(|total| *total > 0) {
+                        let fraction = (progress.completed as f32 / total as f32).clamp(0.0, 1.0);
+                        ui.add(
+                            egui::ProgressBar::new(fraction)
+                                .desired_width(220.0)
+                                .text(format!("{:.0}%", fraction * 100.0)),
+                        );
+                    } else {
+                        ui.spinner();
+                    }
+                    ui.label(&progress.detail);
+                    if ui.button("Cancel").clicked() {
+                        cancel_mtp = true;
+                    }
+                });
+            } else if let Some(operation) = self.mtp_operation {
+                ui.spinner();
+                ui.label(format!("MTP {operation}..."));
+                if ui.button("Cancel").clicked() {
+                    cancel_mtp = true;
+                }
             }
             if let Some(notice) = &self.notice {
                 ui.colored_label(egui::Color32::LIGHT_GREEN, notice);
@@ -1263,6 +1392,9 @@ impl eframe::App for MyApp {
                 ui.colored_label(egui::Color32::LIGHT_RED, error);
             }
         });
+        if cancel_mtp {
+            self.cancel_mtp_operation();
+        }
 
         self.shortcut_editor(&ctx);
         self.burst_settings_editor(&ctx);

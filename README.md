@@ -2,7 +2,7 @@
 
 This program aims to automate as much as possible of a fast, safe photo backup and culling routine.
 
-The command-line MTP backend currently works on Windows. The application and media-source boundary compile on Windows, Linux, and macOS so platform MTP backends can be added without coupling the culling UI to one protocol implementation.
+The command-line MTP backend works on Windows and Linux. All device access runs behind the same dedicated worker boundary used by direct culling; native device handles never cross into the CLI or UI. macOS remains unsupported.
 
 The direct culling UI supports Windows and Linux MTP-mode devices. Linux setup, permissions, and limits are documented in [`docs/linux.md`](docs/linux.md).
 
@@ -15,8 +15,8 @@ The direct culling UI supports Windows and Linux MTP-mode devices. Linux setup, 
   - `2023-12-28` is the current date (defaults to timestamp when the program is run, but can be overridden)
   - `Album name` is a configurable album name
 
-- [ ] Select which photos to keep (so that both JPEG and RAW files are deleted if the JPEG is deleted)
-- [ ] Optionally delete the files from the MTP device after copying
+- [x] Select which photos to keep with exact-stem JPEG+RAW pairing
+- Device deletion is intentionally unsupported; direct culling only imports explicit Keep files
 - [ ] Upload the resulting album to Google Photos
 
 ## Local culling
@@ -29,7 +29,7 @@ The `ui` command opens a local culling session. Select an album folder, then opt
 - Sharpness is a background Tenengrad-style score for JPEG companions. It is only a sortable hint, never an automatic decision.
 - Rejections are applied only from an explicit review screen. Every affected file is re-fingerprinted before it is sent to the platform recycle bin/trash.
 
-On Windows, `ui` also supports direct MTP culling: choose a device and source folder, cull temporary cached JPEG companions, then import only explicit Keep pairs. Device files are never deleted; rejected and unrated files remain on the device. The worker design and verification constraints are documented in [`docs/direct-mtp-culling.md`](docs/direct-mtp-culling.md).
+On Windows and Linux, `ui` also supports direct MTP culling: choose a device and source folder, cull temporary cached JPEG companions, then import only explicit Keep pairs. Long operations report progress and can be cancelled. Device files are never deleted; rejected and unrated files remain on the device. The worker design and verification constraints are documented in [`docs/direct-mtp-culling.md`](docs/direct-mtp-culling.md).
 
 ## Development
 

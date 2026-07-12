@@ -1,6 +1,6 @@
 # Linux Support
 
-The direct culling UI supports Linux MTP-mode devices through the pure-Rust `mtp-rs` backend. It is intended for modern Android phones, including Google Pixel, and cameras that explicitly expose MTP mode. PTP/PictBridge-only cameras are not supported yet.
+The direct culling UI and the `list`, `list-content`, and `copy` commands support Linux MTP-mode devices through the pure-Rust `mtp-rs` backend. It is intended for modern Android phones, including Google Pixel, and cameras that explicitly expose MTP mode. PTP/PictBridge-only cameras are not supported yet.
 
 ## Development
 
@@ -27,6 +27,6 @@ The first hardware validation targets are a Google Pixel and a Fujifilm camera i
 
 ## Known Limits
 
-- Recursive MTP enumeration is intentionally manual for Android compatibility and may take time on large phone trees.
-- Linux support currently covers the direct UI workflow. The older `list`, `list-content`, and `copy` CLI MTP commands still use the Windows-only backend.
+- Recursive MTP enumeration may take time on large phone trees. The UI reports progress and supports cooperative cancellation between device metadata requests.
+- Linux CLI paths include the storage root shown by `list-content`, for example `Internal storage/DCIM/Camera`.
 - Flatpak support requires an explicit raw USB permission such as `--device=usb`; it is not packaged yet.
