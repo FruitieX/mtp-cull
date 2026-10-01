@@ -154,6 +154,8 @@ pub struct Canvas {
     pub pane_rects: Vec<(bool, Rect)>,
     #[cfg(feature = "ui-smoke")]
     pub menu_items: Vec<(crate::review_commands::Command, Rect)>,
+    #[cfg(feature = "ui-smoke")]
+    pub texture_uploads: u64,
     textures: HashMap<Key, Texture>,
     overlays: HashMap<Key, Overlay>,
     tick: u64,
@@ -183,6 +185,8 @@ impl Default for Canvas {
             pane_rects: Vec::new(),
             #[cfg(feature = "ui-smoke")]
             menu_items: Vec::new(),
+            #[cfg(feature = "ui-smoke")]
+            texture_uploads: 0,
             textures: HashMap::new(),
             overlays: HashMap::new(),
             tick: 0,
@@ -534,7 +538,7 @@ impl Canvas {
             self.drag_region_start = None;
         }
         let image_rect = self.viewport.image_rect(rect, source, dpi, b);
-        if let Some(texture) = self.texture(ui.ctx(), &loaded, &picture) {
+        if let Some(texture) = self.texture(ui.ctx(), &loaded, &picture, false) {
             painter.image(
                 texture,
                 image_rect,
@@ -624,6 +628,7 @@ impl Canvas {
         ctx: &egui::Context,
         key: &Key,
         picture: &Arc<Picture>,
+        background: bool,
     ) -> Option<egui::TextureId> {
         self.tick += 1;
         if let Some(texture) = self.textures.get_mut(key) {
@@ -631,6 +636,13 @@ impl Canvas {
             return Some(texture.handle.id());
         }
         let bytes = picture.image.pixels.len() * 4;
+        let resident_bytes = self.sampling.bytes(picture.image.size);
+        // Never admit speculative textures that the next frame must evict.
+        // Include mip levels: two 40 MP photos already use about 405 MiB.
+        // Visible panes may exceed the budget; background work must wait.
+        if background && resident_bytes > self.budget.saturating_sub(self.bytes()) {
+            return None;
+        }
         // A native image may exceed the per-frame byte allowance. Allow one
         // oversized upload to make progress, then defer the other pane.
         if self.uploads_left == 0 || (self.uploaded && bytes > self.upload_bytes_left) {
@@ -640,6 +652,10 @@ impl Canvas {
         self.uploads_left -= 1;
         self.upload_bytes_left = self.upload_bytes_left.saturating_sub(bytes);
         self.uploaded = true;
+        #[cfg(feature = "ui-smoke")]
+        {
+            self.texture_uploads += 1;
+        }
         let handle = if self.sampling == Sampling::Smooth
             && let Some(gpu) = &self.gpu
         {
@@ -656,7 +672,7 @@ impl Canvas {
             key.clone(),
             Texture {
                 handle,
-                bytes: self.sampling.bytes(picture.image.size),
+                bytes: resident_bytes,
                 tick: self.tick,
             },
         );
@@ -673,7 +689,7 @@ impl Canvas {
                 break;
             }
             if let Some(picture) = cache.get(&key) {
-                let _ = self.texture(ctx, &key, &picture);
+                let _ = self.texture(ctx, &key, &picture, true);
             }
         }
     }
@@ -682,6 +698,47 @@ impl Canvas {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn speculative_uploads_include_mips_and_never_overfill_the_cache() {
+        let ctx = egui::Context::default();
+        let picture = Arc::new(Picture {
+            image: Arc::new(egui::ColorImage::filled([8, 8], Color32::GRAY)),
+            source_size: [8, 8],
+            focus: None,
+            decode_time: std::time::Duration::ZERO,
+            feature: Default::default(),
+        });
+        let a = Key::native("A.JPG".into());
+        let b = Key::native("B.JPG".into());
+        let c = Key::native("C.JPG".into());
+        let mut canvas = Canvas {
+            budget: 600,
+            ..Default::default()
+        };
+        // A fits. B's base level would fit, but its full pyramid would not.
+        canvas.uploads_left = 10;
+        canvas.upload_bytes_left = usize::MAX;
+        assert!(canvas.texture(&ctx, &a, &picture, false).is_some());
+        assert_eq!(canvas.bytes(), 340);
+        for _ in 0..100 {
+            assert!(canvas.texture(&ctx, &b, &picture, true).is_none());
+        }
+        assert_eq!(canvas.bytes(), 340);
+        assert_eq!(
+            canvas.uploads_left, 9,
+            "rejected prefetch must not consume uploads"
+        );
+        // A visible pane can still make progress if the user budget is too small.
+        assert!(canvas.texture(&ctx, &b, &picture, false).is_some());
+        assert_eq!(canvas.bytes(), 680);
+        assert!(canvas.texture(&ctx, &c, &picture, true).is_none());
+        // More budget admits B once and subsequently reuses its texture.
+        canvas.budget = 1024;
+        let id = canvas.texture(&ctx, &c, &picture, true).unwrap();
+        let uploads_left = canvas.uploads_left;
+        assert_eq!(canvas.texture(&ctx, &c, &picture, true), Some(id));
+        assert_eq!(canvas.uploads_left, uploads_left);
+    }
     #[test]
     fn mipmap_memory_is_counted_and_sampling_changes_invalidate_only_gpu_images() {
         assert_eq!(Sampling::Linear.bytes([8, 8]), 256);

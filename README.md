@@ -21,6 +21,11 @@ and NASM, then run:
 ./target/release/mtp-cull.exe
 ```
 
+Use a release build for photo review. Plain `cargo run` builds unoptimized code;
+decoding and resizing camera JPEGs can then take long enough to look stuck.
+Staged camera originals and review decisions persist, but decoded CPU/GPU
+previews and thumbnails are rebuilt in memory after each launch.
+
 Running the binary without arguments opens the UI, including when double-clicked
 in Windows. UI launch closes its Explorer-created console; launches from an
 existing terminal keep that terminal attached. Explicit CLI subcommands and
@@ -58,6 +63,10 @@ The MTP CLI commands support Windows and Linux through the same device worker.
 5. Open **Import selected**, choose JPEG/RAW/video destinations, date and album,
    and copy. Videos default to selected and included. Unreviewed JPEGs are excluded.
    Each media type uses its own destination root: `root/year/date album/name`.
+   **Destination preset** fills the roots and album from a saved import preset,
+   preserving the session date and all review decisions. **Save as preset** opens
+   the editor with these settings and the current camera filled in; give it a
+   camera/photographer name and save. Saving returns to the import dialog.
 
 The toolbar groups decisions, pin/swap, comparison mode, zoom and focus tools.
 Media and decision filters sit above the filmstrip. **More** opens Settings,
@@ -77,7 +86,11 @@ copies all Keep decisions, independently of the current editing selection.
 Drag the reel's top edge to resize it; row previews grow with the panel. **Grid**
 (Ctrl+G) switches to multiple rows with vertical scrolling; **Row** returns to
 horizontal scrolling. A normal wheel scrolls left/right in Row mode and up/down
-in Grid mode; Shift is optional. Settings > Review adjusts reel scroll speed and
+in Grid mode. Up/Down moves between grid rows in the same column (the last photo
+is used in an incomplete row); Left/Right moves one photo. Up/Down moves one photo
+when using a single row. Navigation stops at the top/bottom row.
+The reel follows keyboard navigation. Shift is optional when scrolling.
+Settings > Review adjusts reel scroll speed and
 grid thumbnail width. Layout and size preferences persist. Right-click a thumbnail
 for decision/selection/pin actions, or the canvas for decisions and viewing tools.
 

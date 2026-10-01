@@ -34,6 +34,8 @@ pub enum Command {
     Camera,
     Previous,
     Next,
+    RowUp,
+    RowDown,
     NextUnreviewed,
     Reject,
     Keep,
@@ -272,6 +274,18 @@ pub const COMMANDS: &[Spec] = &[
         id: "next",
         label: "Next candidate",
         key: "ArrowRight",
+    },
+    Spec {
+        command: Command::RowUp,
+        id: "row_up",
+        label: "Previous grid row / previous candidate",
+        key: "ArrowUp",
+    },
+    Spec {
+        command: Command::RowDown,
+        id: "row_down",
+        label: "Next grid row / next candidate",
+        key: "ArrowDown",
     },
     Spec {
         command: Command::NextUnreviewed,

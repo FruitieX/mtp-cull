@@ -74,6 +74,9 @@ impl App {
 
     pub(super) fn presets_dialog(&mut self, ctx: &egui::Context) {
         if !self.presets_open {
+            if std::mem::take(&mut self.preset_from_review) && self.session.is_some() {
+                self.import_open = true;
+            }
             return;
         }
         let mut open = true;
@@ -86,6 +89,7 @@ impl App {
             .max_height((ctx.content_rect().height() - 90.0).max(300.0))
             .show(ctx, |ui| {
                 ui.label("Copy all supported photos, RAW files and videos without culling.");
+                ui.weak("During review, choose a preset in Import selected to reuse its destinations and album. Device and source settings only affect imports without reviewing.");
                 ui.label(
                     egui::RichText::new("Files go to destination / year / date album / filename.")
                         .small()
@@ -290,6 +294,9 @@ impl App {
                             presets.push(draft.clone());
                         }
                         cancel = self.write_presets(presets);
+                        if cancel && self.preset_from_review {
+                            self.presets_open = false;
+                        }
                     }
                     if !cancel {
                         self.preset_edit = Some((index, draft));
@@ -314,6 +321,12 @@ impl App {
         if !open {
             self.presets_open = false;
             self.preset_edit = None;
+        }
+        if !self.presets_open
+            && std::mem::take(&mut self.preset_from_review)
+            && self.session.is_some()
+        {
+            self.import_open = true;
         }
     }
 }

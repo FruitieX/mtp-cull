@@ -217,3 +217,26 @@ $env:MTP_CULL_SMOKE_REEL = '1'
 Use `MTP_CULL_SMOKE_SIZE=1024x768` for the compact run. Remove
 `MTP_CULL_SMOKE_REEL` for the full viewer/import smoke. Production package builds
 omit `ui-smoke`; these synthetic input events never run in normal use.
+
+## GPU prefetch budget correction
+
+Speculative uploads previously checked only whether the cache was already full,
+allowing one more native image to exceed it. The following frame evicted that
+image, then prefetch uploaded it again. Mipmaps made this easier to trigger by
+adding approximately one third to image storage. Admission now checks the entire
+image pyramid against the remaining budget before uploading. Visible images can
+still exceed an undersized user budget so both comparison panes make progress.
+
+The regression suite passes 63 tests (two opt-in), including filtered grid row
+navigation, reuse of review destination presets and mip-aware upload admission.
+Native input verifies Up/Down in the 500-shot grid. A 2560x1440 renderer exercise
+verifies no new texture uploads over 64 idle frames after native comparison has
+warmed, then completes selected import/retry and session/recent-folder resume.
+Its 117 warm UI CPU samples have median/p95/maximum 0.254/0.395/2.228 ms; these
+exclude GPU presentation and do not establish cold-upload or input latency.
+
+Plain debug builds perform image processing without optimizations. Review with
+the SIMD release build; disk staging retains originals across launches, while
+decoded preview/thumbnail textures are recreated. A 1-2 GiB GPU cache can retain
+more native neighbors when GPU memory allows; the corrected budget check also
+works with the existing 512 MiB default.

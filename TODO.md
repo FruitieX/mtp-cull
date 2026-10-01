@@ -152,3 +152,12 @@ Verification passes 60 tests (two opt-in), strict Clippy and formatting. Native
 500-shot reel input and GPU checkerboard readback pass at both window sizes;
 the full viewer/focus/import/retry/resume smoke also passes. See
 [docs/performance.md](docs/performance.md) for timings and limits.
+
+## October 2026 review follow-ups
+
+- [x] Navigate grid rows with Up/Down using the current column count and follow the active photo.
+- [x] Stop speculative GPU uploads exceeding the cache budget, including mip levels, to prevent repeated eviction/upload cycles.
+- [x] Reuse saved camera/photographer destination presets in the reviewed import dialog without changing decisions or dates.
+- [x] Prefill new presets from review destinations and remembered camera names/paths; return to the import dialog after saving.
+- [x] Explain import layout and release-build requirements; preserve staged originals and review choices.
+- [x] Cover grid boundaries, filtered order, preset semantics and GPU prefetch admission; verify native grid input and idle native comparison.

@@ -127,12 +127,17 @@ struct App {
     presets_path: PathBuf,
     presets: Vec<ImportPreset>,
     presets_open: bool,
+    preset_from_review: bool,
     preset_edit: Option<(Option<usize>, ImportPreset)>,
     preset_error: Option<String>,
     quick_import: Option<quick_import::Run>,
     settings_open: bool,
     settings_tab: u8,
     import_open: bool,
+    #[cfg(feature = "ui-smoke")]
+    import_area: Option<(egui::Rect, egui::LayerId)>,
+    #[cfg(feature = "ui-smoke")]
+    import_ui_state: (bool, bool),
     help_open: bool,
     palette_open: bool,
     palette_query: String,
@@ -206,12 +211,17 @@ impl App {
             presets_path,
             presets,
             presets_open: false,
+            preset_from_review: false,
             preset_edit: None,
             preset_error,
             quick_import: None,
             settings_open: false,
             settings_tab: 0,
             import_open: false,
+            #[cfg(feature = "ui-smoke")]
+            import_area: None,
+            #[cfg(feature = "ui-smoke")]
+            import_ui_state: (false, false),
             help_open: false,
             palette_open: false,
             palette_query: String::new(),
@@ -379,7 +389,7 @@ impl App {
         self.reel_follow = true;
     }
     fn navigate(&mut self, direction: isize) {
-        self.last_direction = direction;
+        self.last_direction = direction.signum();
         if let Some(position) = self.visible.iter().position(|i| *i == self.selected) {
             let next = position
                 .saturating_add_signed(direction)
@@ -388,6 +398,20 @@ impl App {
             self.reel_selection.single(self.selected);
             self.reel_follow = true;
             self.canvas.active_a = false;
+        }
+    }
+    fn navigate_row(&mut self, direction: isize) {
+        if !self.settings.reel_grid {
+            self.navigate(direction);
+            return;
+        }
+        let columns = self.reel_layout.map_or(1, |(columns, _)| columns.max(1));
+        if let Some(position) = self.visible.iter().position(|i| *i == self.selected) {
+            let row = position / columns;
+            let rows = self.visible.len().div_ceil(columns);
+            if (direction < 0 && row > 0) || (direction > 0 && row + 1 < rows) {
+                self.navigate(direction * columns as isize);
+            }
         }
     }
     fn decide(&mut self, decision: Decision, bulk: bool) {
@@ -575,6 +599,8 @@ impl App {
             }
             Command::Previous => self.navigate(-1),
             Command::Next => self.navigate(1),
+            Command::RowUp => self.navigate_row(-1),
+            Command::RowDown => self.navigate_row(1),
             Command::NextUnreviewed => {
                 if let Some(session) = &self.session
                     && let Some(index) = self
@@ -2126,10 +2152,37 @@ impl App {
             return;
         }
         let mut open = true;
-        egui::Window::new("Import selected originals")
+        let _shown = egui::Window::new("Import selected originals")
             .open(&mut open)
             .default_width(650.0)
+            .default_pos(ctx.content_rect().center() - egui::vec2(325.0, 230.0))
             .show(ctx, |ui| {
+                #[cfg(feature = "ui-smoke")]
+                { self.import_ui_state = (ui.is_visible(), ui.is_sizing_pass()); }
+                let mut chosen = None;
+                ui.horizontal(|ui| {
+                    ui.label("Destination preset");
+                    egui::ComboBox::from_id_salt("review-destination-preset")
+                        .selected_text("Choose a saved preset...")
+                        .show_ui(ui, |ui| {
+                            for preset in &self.presets {
+                                if ui.button(&preset.name).on_hover_text(preset.detail()).clicked() {
+                                    chosen = Some(preset.clone());
+                                }
+                            }
+                            if self.presets.is_empty() { ui.weak("No saved presets yet"); }
+                        });
+                    if ui.button("Save as preset...").clicked() {
+                        self.preset_edit = Some((None, self.review_import_preset()));
+                        self.presets_open = true;
+                        self.preset_from_review = true;
+                        self.import_open = false;
+                    }
+                });
+                if let Some(preset) = chosen { self.apply_review_destinations(&preset); }
+                ui.weak("Presets fill destinations and album; your date and review choices stay as set.");
+                if let Some(error) = &self.preset_error { ui.colored_label(theme::REJECT, error); }
+                ui.separator();
                 folder_field(ui, "JPEG destination", &mut self.settings.picture_root);
                 folder_field(ui, "RAW destination", &mut self.settings.raw_root);
                 folder_field(ui, "Video destination", &mut self.settings.video_root);
@@ -2142,6 +2195,7 @@ impl App {
                     ui.text_edit_singleline(&mut self.date);
                 });
                 ui.checkbox(&mut self.settings.include_videos, "Include videos");
+                ui.weak("Layout: destination / year / date album / filename");
                 let selected = self
                     .session
                     .as_ref()
@@ -2188,9 +2242,45 @@ impl App {
                     self.import_open = false;
                 }
             });
+        #[cfg(feature = "ui-smoke")]
+        {
+            self.import_area = _shown.map(|shown| (shown.response.rect, shown.response.layer_id));
+        }
         if !open {
             self.import_open = false;
         }
+    }
+    fn apply_review_destinations(&mut self, preset: &ImportPreset) {
+        self.settings.picture_root = preset.pictures_path.clone();
+        self.settings.raw_root = preset.raw_path.clone();
+        self.settings.video_root = preset.videos_path.clone();
+        self.settings.album = preset.album_name.clone();
+    }
+    fn review_import_preset(&self) -> ImportPreset {
+        let mut preset = ImportPreset {
+            pictures_path: self.settings.picture_root.clone(),
+            raw_path: self.settings.raw_root.clone(),
+            videos_path: self.settings.video_root.clone(),
+            album_name: self.settings.album.clone(),
+            // A reusable profile should not lock future sessions to this date.
+            ..Default::default()
+        };
+        if let Some(session) = &self.session
+            && let Source::Mtp { device, folder } = &session.source
+            && let Some(RecentSource::Camera {
+                device_name,
+                folder_path,
+                ..
+            }) = self.settings.recent_sources.iter().find(|source| {
+                matches!(source,
+                    RecentSource::Camera { device_id, folder_id, .. }
+                        if device_id == device && folder_id == folder)
+            })
+        {
+            preset.device = device_name.clone();
+            preset.source_path = folder_path.clone();
+        }
+        preset
     }
     fn start_import(&mut self, selected: Vec<String>) {
         self.save();
@@ -2494,6 +2584,89 @@ fn folder_field(ui: &mut egui::Ui, label: &str, value: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn grid_rows_follow_filtered_order_and_stop_at_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = fixture_app(root.path());
+        app.visible = vec![10, 12, 14, 16, 18, 20, 22];
+        app.settings.reel_grid = true;
+        app.reel_layout = Some((3, egui::vec2(100.0, 100.0)));
+        app.selected = 12;
+        app.command(Command::RowUp);
+        assert_eq!(app.selected, 12, "top row must stay in its column");
+        app.command(Command::RowDown);
+        assert_eq!(app.selected, 18);
+        assert_eq!(app.reel_selection.indices, [18].into_iter().collect());
+        assert!(app.reel_follow);
+        app.command(Command::RowDown);
+        assert_eq!(app.selected, 22, "incomplete last row uses its last photo");
+        app.command(Command::RowDown);
+        assert_eq!(app.selected, 22);
+        app.command(Command::RowUp);
+        assert_eq!(app.selected, 16);
+        app.settings.reel_grid = false;
+        app.command(Command::RowUp);
+        assert_eq!(app.selected, 14, "a single row moves by one photo");
+        app.visible.clear();
+        app.command(Command::RowDown);
+        assert_eq!(app.selected, 14);
+    }
+    #[test]
+    fn review_presets_reuse_roots_without_changing_dates_sources_or_decisions() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = fixture_app(root.path());
+        app.command(Command::Keep);
+        let before = app.session.as_ref().unwrap().selected_ids(&app.settings);
+        app.date = "2026-09-15".into();
+        let preset = ImportPreset {
+            pictures_path: "P:/Photographer".into(),
+            raw_path: "Z:/Camera/RAW".into(),
+            videos_path: "V:/Photographer".into(),
+            album_name: "Holiday".into(),
+            date: "2020-01-01".into(),
+            device: "Different camera".into(),
+            ..Default::default()
+        };
+        app.apply_review_destinations(&preset);
+        assert_eq!(app.settings.picture_root, preset.pictures_path);
+        assert_eq!(app.settings.raw_root, preset.raw_path);
+        assert_eq!(app.settings.video_root, preset.videos_path);
+        assert_eq!(app.date, "2026-09-15");
+        assert_eq!(
+            app.session.as_ref().unwrap().selected_ids(&app.settings),
+            before
+        );
+        assert!(matches!(
+            app.session.as_ref().unwrap().source,
+            Source::Local { .. }
+        ));
+        let paths = app.destinations().unwrap();
+        assert_eq!(paths.album_name.as_deref(), Some("Holiday"));
+        app.session.as_mut().unwrap().source = Source::Mtp {
+            device: "device-id".into(),
+            folder: "folder-id".into(),
+        };
+        app.settings.recent_sources = vec![RecentSource::Camera {
+            device_id: "device-id".into(),
+            device_name: "X-T5".into(),
+            folder_id: "folder-id".into(),
+            folder_path: "SD Card/DCIM".into(),
+        }];
+        let draft = app.review_import_preset();
+        assert_eq!(draft.device, "X-T5");
+        assert_eq!(draft.source_path, "SD Card/DCIM");
+        assert_eq!(draft.raw_path, preset.raw_path);
+        assert!(
+            draft.date.is_empty(),
+            "reusable presets must not retain a session date"
+        );
+        assert!(draft.name.is_empty(), "users choose their own preset names");
+        // Returning from the preset editor resumes the destination dialog.
+        app.preset_from_review = true;
+        app.presets_dialog(&egui::Context::default());
+        assert!(app.import_open);
+        assert!(!app.preset_from_review);
+    }
     fn fixture_app(root: &std::path::Path) -> App {
         let photos = root.join("photos");
         std::fs::create_dir_all(&photos).unwrap();

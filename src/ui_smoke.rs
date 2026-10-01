@@ -13,6 +13,7 @@ pub(super) struct Smoke {
     waiting: Option<String>,
     received: BTreeSet<String>,
     samples: Vec<f64>,
+    warm_uploads: u64,
 }
 impl Smoke {
     pub fn input_ready(&self) -> bool {
@@ -39,6 +40,7 @@ impl Smoke {
             waiting: None,
             received: BTreeSet::new(),
             samples: Vec::new(),
+            warm_uploads: 0,
             blink: false,
             input: Vec::new(),
         }))
@@ -273,6 +275,29 @@ impl Smoke {
                     bail!("grid did not follow navigation");
                 }
                 self.capture(ctx, "reel-grid-follow");
+                self.key(egui::Key::ArrowDown, egui::Modifiers::NONE);
+                self.step = 40;
+            }
+            40 => {
+                let columns = app.reel_layout.unwrap().0;
+                if app.selected != 80 + columns {
+                    bail!(
+                        "Down did not move one grid row: {} with {columns} columns",
+                        app.selected
+                    );
+                }
+                self.key(egui::Key::ArrowUp, egui::Modifiers::NONE);
+                self.step = 41;
+            }
+            41 => {
+                if app.selected != 80
+                    || !app
+                        .reel_cells
+                        .iter()
+                        .any(|(i, r)| *i == 80 && app.reel_clip.contains(r.center()))
+                {
+                    bail!("Up did not return to the same column or reel did not follow");
+                }
                 let rect = app
                     .canvas
                     .pane_rects
@@ -410,7 +435,7 @@ impl Smoke {
             20 => {
                 std::fs::write(
                     self.root.join("PASS.txt"),
-                    "PASS: synthetic 500-photo reel; keyboard-follow in row/grid; Ctrl-click batch; Ctrl+A selection; 1/0 batch decisions; thumbnail and canvas context actions; normal-wheel scrolling; native panel resize; GPU checkerboard low-pass readback.\n",
+                    "PASS: synthetic 500-photo reel; keyboard-follow in row/grid; Up/Down row navigation; Ctrl-click batch; Ctrl+A selection; 1/0 batch decisions; thumbnail and canvas context actions; normal-wheel scrolling; native panel resize; GPU checkerboard low-pass readback.\n",
                 )?;
                 self.step = 255;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -584,7 +609,37 @@ impl Smoke {
             }
             7 => {
                 self.capture(ctx, "focus-region");
+                self.step = 35;
+            }
+            35 => {
+                app.canvas.peaking = false;
+                app.canvas.region = None;
+                self.step = 37;
+                self.frames = 0;
+            }
+            37 => {
+                // Switching away from focus can replace both visible textures
+                // and admit a deferred neighbor. Let that transition settle.
+                if self.frames < 40 {
+                    return Ok(());
+                }
+                self.warm_uploads = app.canvas.texture_uploads;
+                self.step = 36;
+                self.frames = 0;
+            }
+            36 => {
+                if self.frames < 64 {
+                    return Ok(());
+                }
+                if app.canvas.texture_uploads != self.warm_uploads {
+                    bail!(
+                        "idle native comparison repeatedly uploaded textures: {} -> {}",
+                        self.warm_uploads,
+                        app.canvas.texture_uploads
+                    );
+                }
                 self.step = 8;
+                self.frames = 0;
             }
             8 => {
                 app.canvas.peaking = false;
@@ -595,6 +650,33 @@ impl Smoke {
                 app.settings.video_root = self.root.join("import/video").display().to_string();
                 app.settings.album = "Smoke".into();
                 app.date = "2026-09-30".into();
+                let mut preset = app.review_import_preset();
+                preset.name = "Fixture destinations".into();
+                app.presets.push(preset);
+                app.import_open = true;
+                self.step = 38;
+                self.frames = 0;
+            }
+            38 => {
+                if !app.import_open {
+                    bail!("review import dialog unexpectedly closed");
+                }
+                if self.frames < 40 {
+                    return Ok(());
+                }
+                let (rect, layer) = app
+                    .import_area
+                    .ok_or_else(|| eyre!("review import dialog missing"))?;
+                if app.import_ui_state != (true, false)
+                    || ctx.layer_id_at(rect.center()) != Some(layer)
+                {
+                    bail!("review import dialog was invisible or obscured");
+                }
+                self.capture(ctx, "review-import-destinations");
+                self.step = 39;
+            }
+            39 => {
+                app.import_open = false;
                 app.start_import(app.session.as_ref().unwrap().selected_ids(&app.settings));
                 self.step = 9;
             }
@@ -639,7 +721,7 @@ impl Smoke {
                     self.samples.sort_by(f64::total_cmp);
                     let n = self.samples.len();
                     let text = format!(
-                        "PASS: linked selections, keep/reject/undo/redo, comparison, native detail, peaking/ROI, import 5 selected assets, identical retry.\nNative renderer: {}x{} points, DPI {}\nWarm UI CPU frames ({} samples): median {:.3} ms, p95 {:.3} ms, max {:.3} ms\nGPU resident {:.1} MiB; CPU resident {:.1} MiB\nPresentation latency is not measured by these CPU timings.\n",
+                        "PASS: linked selections, keep/reject/undo/redo, comparison, native detail, peaking/ROI, idle native comparison without repeated uploads, review import destinations/presets, import 5 selected assets, identical retry.\nNative renderer: {}x{} points, DPI {}\nWarm UI CPU frames ({} samples): median {:.3} ms, p95 {:.3} ms, max {:.3} ms\nGPU resident {:.1} MiB; CPU resident {:.1} MiB\nPresentation latency is not measured by these CPU timings.\n",
                         ctx.content_rect().width(),
                         ctx.content_rect().height(),
                         ctx.pixels_per_point(),
