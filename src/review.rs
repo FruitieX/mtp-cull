@@ -202,6 +202,7 @@ pub struct Settings {
     pub video_root: String,
     pub album: String,
     pub bindings: BTreeMap<String, String>,
+    pub recent_sources: Vec<crate::recent_sources::RecentSource>,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -220,6 +221,7 @@ impl Default for Settings {
             video_root: String::new(),
             album: String::new(),
             bindings: BTreeMap::new(),
+            recent_sources: Vec::new(),
         }
     }
 }

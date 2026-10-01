@@ -157,6 +157,47 @@ impl Drop for Store {
 mod tests {
     use super::*;
     #[test]
+    fn recent_sources_survive_restart_and_older_settings_default_to_empty_history() {
+        use crate::recent_sources::RecentSource;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("review.sqlite3");
+        let sources = vec![
+            RecentSource::Local {
+                root: "C:/Photos/session".into(),
+                raw: Some("C:/Photos/RAW".into()),
+            },
+            RecentSource::Camera {
+                device_id: "device-id".into(),
+                device_name: "Fujifilm X-T5".into(),
+                folder_id: "folder-id".into(),
+                folder_path: "DCIM/100_FUJI".into(),
+            },
+        ];
+        {
+            let store = Store::at(path.clone()).unwrap();
+            store.save_settings(&Settings {
+                recent_sources: sources.clone(),
+                ..Settings::default()
+            });
+        }
+        {
+            let store = Store::at(path.clone()).unwrap();
+            assert_eq!(store.settings().unwrap().recent_sources, sources);
+        }
+        // A pre-history settings record still loads its other preferences.
+        connect(&path)
+            .unwrap()
+            .execute(
+                "UPDATE review_settings SET json=?1 WHERE id=1",
+                [r#"{"auto_advance":true}"#],
+            )
+            .unwrap();
+        let store = Store::at(path).unwrap();
+        let settings = store.settings().unwrap();
+        assert!(settings.recent_sources.is_empty());
+        assert!(settings.auto_advance);
+    }
+    #[test]
     fn legacy_all_filter_binding_is_split_without_losing_customizations() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("review.sqlite3");

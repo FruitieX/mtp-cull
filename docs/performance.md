@@ -114,7 +114,7 @@ Review/Performance/Shortcuts settings tabs. Set `MTP_CULL_SMOKE_SIZE=1024x768` t
 repeat the compact-window run; the default remains 2560x1440.
 
 The functional suite now includes the merged CLI request/retry path, safe-copy
-regressions and distinct persisted shortcut IDs. Windows has 44 passing tests
+regressions and distinct persisted shortcut IDs. Windows has 47 passing tests
 and two opt-in fixture/benchmark tests; the Windows-hosted Linux adapter/API
 harness has 21 passing tests. Formatting and strict Clippy pass.
 
@@ -132,3 +132,12 @@ Final refresh runs used 117 warm frame samples each, with generated 40 MP fixtur
 These are application/UI CPU times, excluding GPU presentation and input-to-photon
 latency. Both runs pass comparison/focus, linked selections, import/retry and resume.
 Settings screenshots confirm visible Save/Cancel controls without binding conflicts.
+
+The recent-source update adds persistence/backwards-compatibility, bounded MRU and
+missing/ambiguous reconnect-resolution regression coverage. Native smoke reopens
+an actual fixture folder through its recent entry and checks its saved linked
+keep/reject decisions. Welcome screenshots at both sizes include local and camera
+suggestions and confirm centered actions. The camera entry in those captures is
+synthetic; no physical camera was contacted by this smoke run. Fresh MTP reconnect
+resolution still needs a physical-device check. Warm UI CPU medians/p95 were
+0.264/0.373 ms at 2560x1440 and 0.264/0.351 ms at 1024x768 in these runs.

@@ -1,6 +1,7 @@
 use crate::image_cache::{ImageCache, Key};
 use crate::imports::{ImportOperation, ImportUpdate};
 use crate::mtp_worker::{ImportPaths, MtpDevice, MtpEvent, MtpRequest, MtpWorker, SourceFolder};
+use crate::recent_sources::{self, RecentSource};
 use crate::review::{self, Decision, History, Kind, Session, Settings, Source};
 use crate::review_commands::{self, COMMANDS, Command};
 use crate::review_store::{SavedReview, Store};
@@ -98,6 +99,7 @@ struct App {
     camera_progress: f32,
     camera_busy: bool,
     camera_picker: bool,
+    pending_camera: Option<(RecentSource, bool)>,
     settings_open: bool,
     settings_tab: u8,
     import_open: bool,
@@ -153,6 +155,7 @@ impl App {
             camera_progress: 0.0,
             camera_busy: false,
             camera_picker: false,
+            pending_camera: None,
             settings_open: false,
             settings_tab: 0,
             import_open: false,
@@ -227,6 +230,7 @@ impl App {
         if let Some(carried) = carried {
             session.restore(&carried);
         }
+        self.remember_source(&session.source);
         self.session = Some(session);
         self.selected = 0;
         self.pinned = None;
@@ -450,77 +454,52 @@ impl App {
                 self.staging_request = None;
             }
             Command::RawFolder => {
-                if self.import.is_some() || self.camera_busy {
+                if !self.can_open_source() {
                     return;
                 }
                 if let Some(Session {
-                    source: Source::Local { root, .. },
+                    source: Source::Local { root, raw },
                     ..
                 }) = &self.session
                 {
                     let root = root.clone();
-                    if let Some(raw) = rfd::FileDialog::new()
+                    let dialog = rfd::FileDialog::new()
                         .set_title("Companion RAW folder")
-                        .pick_folder()
-                    {
-                        self.save();
-                        let previous = self
-                            .session
-                            .as_ref()
-                            .map(Session::selections)
-                            .unwrap_or_default();
-                        let (sender, receiver) = mpsc::channel();
-                        self.loader = Some(receiver);
-                        std::thread::spawn(move || {
-                            let _ = sender.send(
-                                review::scan_local(root, Some(raw))
-                                    .map(|mut session| {
-                                        session.restore(&previous);
-                                        session
-                                    })
-                                    .map_err(|e| format!("{e:#}")),
-                            );
-                        });
+                        .set_directory(raw.as_ref().unwrap_or(&root));
+                    if let Some(raw) = dialog.pick_folder() {
+                        self.open_local(root, Some(raw));
                     }
                 }
             }
             Command::Open => {
-                if self.import.is_some() || self.camera_busy {
+                if !self.can_open_source() {
                     return;
                 }
-                if let Some(root) = rfd::FileDialog::new()
-                    .set_title("JPEG album or camera staging folder")
-                    .pick_folder()
+                let mut dialog =
+                    rfd::FileDialog::new().set_title("JPEG album or camera staging folder");
+                if let Some(root) =
+                    self.settings
+                        .recent_sources
+                        .iter()
+                        .find_map(|source| match source {
+                            RecentSource::Local { root, .. } => Some(root),
+                            _ => None,
+                        })
                 {
-                    self.save();
-                    self.send(MtpRequest::CloseSession);
-                    self.staging_text.clear();
-                    self.staging_active = false;
-                    let raw = None;
-                    let (sender, receiver) = mpsc::channel();
-                    self.loader = Some(receiver);
-                    std::thread::spawn(move || {
-                        let _ = sender
-                            .send(review::scan_local(root, raw).map_err(|e| format!("{e:#}")));
-                    });
+                    dialog = dialog.set_directory(root);
+                }
+                if let Some(root) = dialog.pick_folder() {
+                    self.open_local(root, None);
                 }
             }
             Command::Camera => {
-                if self.import.is_some() || self.camera_busy {
-                    return;
-                }
-                match self
-                    .worker
-                    .as_ref()
-                    .map(|_| Ok(()))
-                    .unwrap_or_else(|| MtpWorker::spawn().map(|worker| self.worker = Some(worker)))
-                {
-                    Ok(()) => {
-                        self.camera_picker = true;
-                        self.send(MtpRequest::ListDevices);
-                    }
-                    Err(error) => self.error = Some(error.to_string()),
-                }
+                let recent = self
+                    .settings
+                    .recent_sources
+                    .iter()
+                    .find(|source| matches!(source, RecentSource::Camera { .. }))
+                    .cloned();
+                self.open_camera(recent.map(|source| (source, false)));
             }
             Command::Previous => self.navigate(-1),
             Command::Next => self.navigate(1),
@@ -706,6 +685,7 @@ impl App {
                 self.help_open = false;
                 self.palette_open = false;
                 self.camera_picker = false;
+                self.pending_camera = None;
             }
         }
     }
@@ -714,6 +694,161 @@ impl App {
             && let Err(error) = worker.send(request)
         {
             self.error = Some(error.to_string());
+        }
+    }
+    fn can_open_source(&self) -> bool {
+        self.import.is_none() && !self.camera_busy && self.loader.is_none()
+    }
+    fn open_local(&mut self, root: PathBuf, raw: Option<PathBuf>) {
+        if !self.can_open_source() {
+            return;
+        }
+        self.save();
+        self.send(MtpRequest::CloseSession);
+        self.camera_picker = false;
+        self.pending_camera = None;
+        self.staging_text.clear();
+        self.staging_active = false;
+        self.error = None;
+        let (sender, receiver) = mpsc::channel();
+        self.loader = Some(receiver);
+        std::thread::spawn(move || {
+            let _ = sender.send(review::scan_local(root, raw).map_err(|e| format!("{e:#}")));
+        });
+    }
+    fn open_recent(&mut self, source: RecentSource) {
+        match source {
+            RecentSource::Local { root, raw } => self.open_local(root, raw),
+            camera => self.open_camera(Some((camera, true))),
+        }
+    }
+    fn open_camera(&mut self, recent: Option<(RecentSource, bool)>) {
+        if !self.can_open_source() {
+            return;
+        }
+        if self.worker.is_none() {
+            match MtpWorker::spawn() {
+                Ok(worker) => self.worker = Some(worker),
+                Err(error) => {
+                    self.error = Some(error.to_string());
+                    return;
+                }
+            }
+        }
+        self.devices.clear();
+        self.folders.clear();
+        self.device = None;
+        self.folder = None;
+        self.pending_camera = recent;
+        self.camera_picker = true;
+        self.camera_busy = true;
+        self.camera_progress = 0.0;
+        self.error = None;
+        self.message = Some("Looking for connected cameras...".into());
+        self.send(MtpRequest::ListDevices);
+    }
+    fn select_camera(&mut self, device_id: String) {
+        self.device = Some(device_id.clone());
+        self.folder = None;
+        self.folders.clear();
+        self.camera_busy = true;
+        self.camera_progress = 0.0;
+        self.message = Some("Reading camera folders...".into());
+        self.send(MtpRequest::ListSourceFolders { device_id });
+    }
+    fn start_camera_review(&mut self) {
+        if self.camera_busy {
+            return;
+        }
+        let (Some(device_id), Some(source_folder_id)) = (self.device.clone(), self.folder.clone())
+        else {
+            return;
+        };
+        if !self
+            .folders
+            .iter()
+            .any(|folder| folder.id == source_folder_id)
+        {
+            return;
+        }
+        self.save();
+        self.camera_busy = true;
+        self.camera_progress = 0.0;
+        self.error = None;
+        self.message = Some("Indexing camera...".into());
+        self.send(MtpRequest::StartSession {
+            device_id,
+            source_folder_id,
+        });
+    }
+    fn remember_source(&mut self, source: &Source) {
+        let recent = match source {
+            Source::Local { root, raw } => RecentSource::Local {
+                root: root.clone(),
+                raw: raw.clone(),
+            },
+            Source::Mtp { device, folder } => {
+                let Some(device) = self.devices.iter().find(|item| item.id == *device) else {
+                    return;
+                };
+                let Some(folder) = self.folders.iter().find(|item| item.id == *folder) else {
+                    return;
+                };
+                if let Some((previous, _)) = self.pending_camera.take()
+                    && previous
+                        .device(&self.devices)
+                        .is_some_and(|item| item.id == device.id)
+                    && previous
+                        .folder(&self.folders)
+                        .is_some_and(|item| item.id == folder.id)
+                {
+                    self.settings
+                        .recent_sources
+                        .retain(|item| item != &previous);
+                }
+                RecentSource::Camera {
+                    device_id: device.id.clone(),
+                    device_name: device.name.clone(),
+                    folder_id: folder.id.clone(),
+                    folder_path: folder.path.clone(),
+                }
+            }
+        };
+        recent_sources::remember(&mut self.settings.recent_sources, recent);
+        self.draft_settings.recent_sources = self.settings.recent_sources.clone();
+        self.store.save_settings(&self.settings);
+    }
+    fn recent_sources_ui(&mut self, ui: &mut egui::Ui, limit: usize, centered: bool) {
+        let sources: Vec<_> = self
+            .settings
+            .recent_sources
+            .iter()
+            .take(limit)
+            .cloned()
+            .collect();
+        let mut chosen = None;
+        for source in sources {
+            let button = egui::Button::new(source.label()).truncate();
+            let response = if centered {
+                ui.add_enabled_ui(self.can_open_source(), |ui| {
+                    ui.add_sized(egui::vec2(ui.available_width().min(440.0), 30.0), button)
+                })
+                .inner
+            } else {
+                ui.add_enabled(self.can_open_source(), button)
+            };
+            if response.on_hover_text(source.detail()).clicked() {
+                chosen = Some(source);
+            }
+            if centered {
+                ui.add_space(4.0);
+            }
+        }
+        if let Some(source) = chosen {
+            self.open_recent(source);
+            if !centered {
+                ui.close();
+            }
         }
     }
     fn poll(&mut self) {
@@ -743,10 +878,51 @@ impl App {
         for event in events {
             match event {
                 MtpEvent::FilesListed(_) | MtpEvent::CopyFinished(_) => {}
-                MtpEvent::Devices(devices) => self.devices = devices,
+                MtpEvent::Devices(devices) => {
+                    if self.camera_picker {
+                        self.devices = devices;
+                        self.camera_busy = false;
+                        let suggested = self
+                            .pending_camera
+                            .as_ref()
+                            .and_then(|(source, _)| source.device(&self.devices))
+                            .or_else(|| {
+                                (self.pending_camera.is_none() && self.devices.len() == 1)
+                                    .then(|| &self.devices[0])
+                            })
+                            .map(|device| device.id.clone());
+                        if let Some(device) = suggested {
+                            self.select_camera(device);
+                        } else {
+                            self.message = Some(
+                                "Connect your camera, then refresh or choose a connected device."
+                                    .into(),
+                            );
+                        }
+                    }
+                }
                 MtpEvent::SourceFolders { device_id, folders } => {
-                    if self.device.as_ref() == Some(&device_id) {
+                    if self.camera_picker && self.device.as_ref() == Some(&device_id) {
                         self.folders = folders;
+                        self.camera_busy = false;
+                        if let Some((source, auto_start)) = &self.pending_camera {
+                            if let Some(folder) = source.folder(&self.folders) {
+                                self.folder = Some(folder.id.clone());
+                                self.message =
+                                    Some("Previously used camera folder selected.".into());
+                                if *auto_start {
+                                    self.start_camera_review();
+                                }
+                            } else {
+                                self.message = Some(
+                                    "Previous folder is unavailable. Choose a camera folder below."
+                                        .into(),
+                                );
+                            }
+                        } else {
+                            self.message =
+                                Some("Choose a camera folder, then start review.".into());
+                        }
                     }
                 }
                 MtpEvent::SessionScanned(session) => {
@@ -1053,6 +1229,18 @@ impl App {
             ui.add_space(14.0);
             self.command_button(ui, "Open folder", Command::Open);
             self.command_button(ui, "Camera", Command::Camera);
+            if !self.settings.recent_sources.is_empty() {
+                ui.menu_button("Recent", |ui| {
+                    self.recent_sources_ui(ui, recent_sources::LIMIT, false);
+                    ui.separator();
+                    if ui.button("Clear recent sources").clicked() {
+                        self.settings.recent_sources.clear();
+                        self.draft_settings.recent_sources.clear();
+                        self.store.save_settings(&self.settings);
+                        ui.close();
+                    }
+                });
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button("More", |ui| {
                     for (label, command) in [
@@ -1741,18 +1929,38 @@ Older inactive caches can be evicted to make room.").small().color(theme::MUTED)
         let mut open = true;
         egui::Window::new("Camera source")
             .open(&mut open)
+            .default_width(440.0)
             .show(ctx, |ui| {
-                for device in self.devices.clone() {
+                ui.horizontal(|ui| {
+                    ui.label("Connected devices");
                     if ui
-                        .selectable_label(self.device.as_ref() == Some(&device.id), &device.name)
+                        .add_enabled(!self.camera_busy, egui::Button::new("Refresh"))
                         .clicked()
                     {
-                        self.device = Some(device.id.clone());
-                        self.folder = None;
-                        self.folders.clear();
-                        self.send(MtpRequest::ListSourceFolders {
-                            device_id: device.id,
-                        });
+                        self.open_camera(self.pending_camera.clone());
+                    }
+                });
+                for device in self.devices.clone() {
+                    if ui
+                        .add_enabled(
+                            !self.camera_busy,
+                            egui::Button::new(&device.name)
+                                .selected(self.device.as_ref() == Some(&device.id)),
+                        )
+                        .clicked()
+                    {
+                        self.pending_camera = self
+                            .settings
+                            .recent_sources
+                            .iter()
+                            .find(|source| {
+                                source
+                                    .device(&self.devices)
+                                    .is_some_and(|item| item.id == device.id)
+                            })
+                            .cloned()
+                            .map(|source| (source, false));
+                        self.select_camera(device.id);
                     }
                 }
                 ui.separator();
@@ -1760,10 +1968,16 @@ Older inactive caches can be evicted to make room.").small().color(theme::MUTED)
                     .max_height(320.0)
                     .show(ui, |ui| {
                         for folder in &self.folders {
+                            let label = if folder.path.is_empty() {
+                                "Device root"
+                            } else {
+                                &folder.path
+                            };
                             if ui
-                                .selectable_label(
-                                    self.folder.as_ref() == Some(&folder.id),
-                                    &folder.path,
+                                .add_enabled(
+                                    !self.camera_busy,
+                                    egui::Button::new(label)
+                                        .selected(self.folder.as_ref() == Some(&folder.id)),
                                 )
                                 .clicked()
                             {
@@ -1771,10 +1985,14 @@ Older inactive caches can be evicted to make room.").small().color(theme::MUTED)
                             }
                         }
                     });
-                if self.camera_busy {
-                    ui.spinner();
-                    ui.label("Indexing camera…");
-                }
+                ui.horizontal(|ui| {
+                    if self.camera_busy {
+                        ui.spinner();
+                    }
+                    if let Some(message) = &self.message {
+                        ui.weak(message);
+                    }
+                });
                 if ui
                     .add_enabled(
                         !self.camera_busy && self.device.is_some() && self.folder.is_some(),
@@ -1782,15 +2000,12 @@ Older inactive caches can be evicted to make room.").small().color(theme::MUTED)
                     )
                     .clicked()
                 {
-                    self.save();
-                    self.camera_busy = true;
-                    self.send(MtpRequest::StartSession {
-                        device_id: self.device.clone().unwrap(),
-                        source_folder_id: self.folder.clone().unwrap(),
-                    });
+                    self.start_camera_review();
                 }
             });
-        self.camera_picker = open;
+        if !open {
+            self.command(Command::Cancel);
+        }
     }
     fn import_dialog(&mut self, ctx: &egui::Context) {
         if !self.import_open {
@@ -1949,7 +2164,14 @@ impl eframe::App for App {
             .frame(egui::Frame::new().fill(theme::BACKGROUND).inner_margin(8))
             .show(ui, |ui| {
                 if self.session.is_none() {
-                    ui.add_space((ui.available_height() * 0.42 - 90.0).max(20.0));
+                    let recent_count = self.settings.recent_sources.len().min(5);
+                    let block_height = 180.0
+                        + if recent_count > 0 {
+                            40.0 + recent_count as f32 * 34.0
+                        } else {
+                            0.0
+                        };
+                    ui.add_space(((ui.available_height() - block_height) * 0.5).max(20.0));
                     ui.vertical_centered(|ui| {
                         ui.heading("Review your photos");
                         ui.add_space(8.0);
@@ -1960,8 +2182,23 @@ impl eframe::App for App {
                             .color(theme::MUTED),
                         );
                         ui.add_space(20.0);
+                        let button_width: f32 = ["Connect camera", "Open a folder"]
+                            .iter()
+                            .map(|label| {
+                                ui.painter()
+                                    .layout_no_wrap(
+                                        (*label).into(),
+                                        egui::TextStyle::Button.resolve(ui.style()),
+                                        ui.visuals().text_color(),
+                                    )
+                                    .size()
+                                    .x
+                                    + 2.0 * ui.spacing().button_padding.x
+                            })
+                            .sum::<f32>()
+                            + ui.spacing().item_spacing.x;
                         ui.allocate_ui_with_layout(
-                            egui::vec2(280.0, 32.0),
+                            egui::vec2(button_width, 32.0),
                             egui::Layout::left_to_right(egui::Align::Center),
                             |ui| {
                                 self.command_button(ui, "Connect camera", Command::Camera);
@@ -1976,6 +2213,16 @@ impl eframe::App for App {
                             .small()
                             .color(theme::MUTED),
                         );
+                        if recent_count > 0 {
+                            ui.add_space(20.0);
+                            ui.label(
+                                egui::RichText::new("Recent sources")
+                                    .small()
+                                    .color(theme::MUTED),
+                            );
+                            ui.add_space(8.0);
+                            self.recent_sources_ui(ui, 5, true);
+                        }
                     });
                 } else if self.visible.is_empty() {
                     ui.centered_and_justified(|ui| {

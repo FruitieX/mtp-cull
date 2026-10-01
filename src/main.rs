@@ -12,6 +12,7 @@ mod mtp_file;
 mod mtp_worker;
 #[cfg(test)]
 mod performance;
+mod recent_sources;
 mod review;
 mod review_commands;
 mod review_store;

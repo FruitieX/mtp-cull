@@ -286,6 +286,24 @@ impl Smoke {
             }
             19 => {
                 app.settings_open = false;
+                if app
+                    .settings
+                    .recent_sources
+                    .iter()
+                    .all(|source| !matches!(source, RecentSource::Local { .. }))
+                {
+                    bail!("successful folder open was not remembered");
+                }
+                // Display a camera shortcut without contacting any physical camera.
+                recent_sources::remember(
+                    &mut app.settings.recent_sources,
+                    RecentSource::Camera {
+                        device_id: "smoke-device".into(),
+                        device_name: "Fujifilm X-T5".into(),
+                        folder_id: "smoke-folder".into(),
+                        folder_path: "DCIM/100_FUJI".into(),
+                    },
+                );
                 app.command(Command::Close);
                 self.step = 14;
                 self.frames = 0;
@@ -295,6 +313,32 @@ impl Smoke {
                 self.step = 15;
             }
             15 => {
+                let source = app
+                    .settings
+                    .recent_sources
+                    .iter()
+                    .find(|source| matches!(source, RecentSource::Local { .. }))
+                    .unwrap()
+                    .clone();
+                app.open_recent(source);
+                self.step = 23;
+                self.frames = 0;
+            }
+            23 => {
+                if app
+                    .session
+                    .as_ref()
+                    .is_none_or(|session| session.selected_ids(&app.settings).len() != 5)
+                {
+                    bail!("reopening a recent folder lost linked keep/reject choices");
+                }
+                self.capture(ctx, "recent-reopened");
+                let mut text = std::fs::read_to_string(self.root.join("PASS.txt"))?;
+                text.push_str("Recent folder reopen with saved selections: PASS\n");
+                std::fs::write(self.root.join("PASS.txt"), text)?;
+                self.step = 24;
+            }
+            24 => {
                 self.step = 255;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }

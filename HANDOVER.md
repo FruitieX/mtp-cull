@@ -22,6 +22,7 @@ measurements and their limits. The original design remains in
 | `review.rs` | Metadata index, pairing, linking, decisions and undo/redo |
 | `review_commands.rs` | Configurable registry, exact shortcut matching/conflicts |
 | `review_store.rs` | SQLite settings, decisions and comparison resume state |
+| `recent_sources.rs` | Bounded source history and fresh device/path resolution |
 | `image_cache.rs` | Bounded decode pool, prioritized demand and CPU tier eviction |
 | `viewer.rs` | Shared transforms, side-by-side/wipe/blink, GPU cache and ROI |
 | `focus.rs`, `bursts.rs` | Native gradient maps and optional capture/similarity groups |
@@ -44,6 +45,24 @@ measurements and their limits. The original design remains in
   session and never recursively deletes user paths.
 - Current images remain pinned; UI work never performs image decode or camera IO.
   Running decodes finish at safe boundaries; obsolete results are discarded.
+
+## Recent sources (October 2026)
+
+Successful session installs update a twelve-entry MRU list in the existing SQLite
+settings record, mirrored into the settings draft to preserve history when saving
+preferences. Local entries include the canonical JPEG and optional RAW folders.
+Camera entries retain friendly names/paths and IDs; reopening resolves against a
+fresh listing, falling back from device ID to a unique name and from folder ID to
+an exact, unique path. Missing/ambiguous matches remain in the picker. Stale camera
+folder IDs are never reused. This history is separate from cache identity and
+review choices; clearing it does not clear either. Older settings default to an
+empty list. Metadata listing runs on the existing device worker; local rescans run
+on the indexer thread. No history-related filesystem probing runs during paint.
+
+The welcome screen shows five suggestions; the toolbar menu shows twelve. Its
+camera button suggests the last camera path without starting review automatically;
+clicking a specific recent source does start review after successful resolution.
+Welcome action buttons use their actual text/padding width for centered alignment.
 
 ## Verification
 

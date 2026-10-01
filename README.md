@@ -53,6 +53,16 @@ Media and decision filters sit above the filmstrip. **More** opens Settings,
 keyboard help and the command palette; **Performance** in the footer shows cache
 and frame diagnostics. Settings has separate Review, Performance and Shortcuts tabs.
 
+The welcome screen suggests the five most recently opened sources; **Recent** in
+the toolbar lists up to twelve. Folder entries also remember a separate RAW folder.
+Camera entries remember the device and folder path: clicking one reopens it after
+checking a fresh MTP listing. **Camera** preselects the last used location so you
+can change it before starting. If the camera or folder is missing or ambiguous,
+choose a current location in the picker; reconnect and **Refresh** to try again.
+Hover a suggestion to see its full path. **Clear recent sources** clears the list
+without removing cached photos or review decisions. History starts recording with
+this version and persists across restarts.
+
 JPEG/RAW/Video and decision filters change visibility independently of selection.
 Disabling linking restores independent RAW decisions. RAW and video entries use
 JPEG companions where available; native RAF decoding and video playback
