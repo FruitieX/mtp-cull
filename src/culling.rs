@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use std::time::SystemTime;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Decision {
@@ -162,6 +163,7 @@ pub struct Session {
 pub enum Action {
     Previous,
     Next,
+    NextUnrated,
     Reject,
     Keep,
     Unrated,
@@ -170,9 +172,10 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Previous,
         Self::Next,
+        Self::NextUnrated,
         Self::Reject,
         Self::Keep,
         Self::Unrated,
@@ -184,6 +187,7 @@ impl Action {
         match self {
             Self::Previous => "previous",
             Self::Next => "next",
+            Self::NextUnrated => "next_unrated",
             Self::Reject => "reject",
             Self::Keep => "keep",
             Self::Unrated => "unrated",
@@ -196,6 +200,7 @@ impl Action {
         match self {
             Self::Previous => "Previous shot",
             Self::Next => "Next shot",
+            Self::NextUnrated => "Next unrated shot",
             Self::Reject => "Reject",
             Self::Keep => "Keep",
             Self::Unrated => "Unrated",
@@ -208,6 +213,7 @@ impl Action {
         match self {
             Self::Previous => "ArrowLeft",
             Self::Next => "ArrowRight",
+            Self::NextUnrated => "Tab",
             Self::Reject => "1",
             Self::Keep => "2",
             Self::Unrated => "0",
@@ -267,6 +273,12 @@ impl Database {
                 similarity INTEGER,
                 algorithm TEXT NOT NULL
             ) STRICT;
+            CREATE TABLE IF NOT EXISTS file_fingerprints (
+                path TEXT PRIMARY KEY NOT NULL,
+                file_size INTEGER NOT NULL,
+                modified_at INTEGER,
+                fingerprint BLOB NOT NULL
+            ) STRICT;
             ",
         )?;
         if !has_column(&connection, "analysis", "similarity")? {
@@ -315,6 +327,61 @@ impl Database {
         }
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Return a content fingerprint, reusing it when the file's cheap filesystem
+    /// identity is unchanged. This keeps reopening a large album fast without
+    /// weakening the content check used before recycling files.
+    pub fn fingerprint_for_path(&self, path: &Path) -> Result<Hash> {
+        let metadata = std::fs::metadata(path)
+            .wrap_err_with(|| format!("failed to stat {}", path.display()))?;
+        let modified_at = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .and_then(|duration| i64::try_from(duration.as_nanos()).ok());
+        let file_size = i64::try_from(metadata.len())
+            .wrap_err_with(|| format!("file is too large to index: {}", path.display()))?;
+        let path_text = path.to_string_lossy().into_owned();
+
+        let connection = self.connection()?;
+        let cached = connection
+            .query_row(
+                "SELECT file_size, modified_at, fingerprint FROM file_fingerprints WHERE path = ?1",
+                [path_text.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Vec<u8>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if let Some((cached_size, cached_modified, bytes)) = cached
+            && cached_size == file_size
+            && cached_modified == modified_at
+            && modified_at.is_some()
+            && bytes.len() == blake3::OUT_LEN
+        {
+            let mut fingerprint = [0_u8; blake3::OUT_LEN];
+            fingerprint.copy_from_slice(&bytes);
+            return Ok(Hash::from_bytes(fingerprint));
+        }
+
+        let fingerprint = fingerprint_file(path)?;
+        connection.execute(
+            "
+            INSERT INTO file_fingerprints (path, file_size, modified_at, fingerprint)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(path) DO UPDATE SET
+                file_size = excluded.file_size,
+                modified_at = excluded.modified_at,
+                fingerprint = excluded.fingerprint
+            ",
+            params![path_text, file_size, modified_at, fingerprint.as_bytes()],
+        )?;
+        Ok(fingerprint)
     }
 
     pub fn keybindings(&self) -> Result<BTreeMap<Action, String>> {
@@ -480,7 +547,7 @@ pub fn load_session(
         let assets = files
             .into_iter()
             .map(|(path, kind)| {
-                let fingerprint = fingerprint_file(&path)?;
+                let fingerprint = database.fingerprint_for_path(&path)?;
                 let analysis = match database.analysis_for(fingerprint)? {
                     Some(analysis) => analysis,
                     None => {
@@ -788,6 +855,28 @@ mod tests {
 
         let reloaded = load_session(&database, directory.path().to_owned(), None).unwrap();
         assert_eq!(reloaded.shots[0].decision, Decision::Keep);
+    }
+
+    #[test]
+    fn caches_fingerprint_for_unchanged_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("photo.JPG");
+        fs::write(&path, b"photo bytes").unwrap();
+        let database = Database::at(directory.path().join("cull.sqlite3")).unwrap();
+
+        let first = database.fingerprint_for_path(&path).unwrap();
+        let second = database.fingerprint_for_path(&path).unwrap();
+
+        assert_eq!(first, second);
+        let connection = database.connection().unwrap();
+        let cached: Vec<u8> = connection
+            .query_row(
+                "SELECT fingerprint FROM file_fingerprints WHERE path = ?1",
+                [path.to_string_lossy().as_ref()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cached, first.as_bytes());
     }
 
     #[test]

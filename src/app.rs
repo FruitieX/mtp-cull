@@ -1,0 +1,1723 @@
+use crate::image_cache::{ImageCache, Key};
+use crate::imports::{ImportOperation, ImportUpdate};
+use crate::mtp_worker::{ImportPaths, MtpDevice, MtpEvent, MtpRequest, MtpWorker, SourceFolder};
+use crate::review::{self, Decision, History, Kind, Session, Settings, Source};
+use crate::review_commands::{self, COMMANDS, Command};
+use crate::review_store::{SavedReview, Store};
+use crate::viewer::{Canvas, Mode, ViewImage};
+use chrono::{Local, NaiveDate};
+use color_eyre::eyre::Result;
+use eframe::egui;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::{atomic::Ordering, mpsc};
+use std::time::{Duration, Instant};
+
+pub fn init(args: &crate::cli::UiArgs) -> Result<()> {
+    let initial = args.source.as_ref().map(|source| {
+        (
+            PathBuf::from(source),
+            args.raw_source.as_ref().map(PathBuf::from),
+        )
+    });
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("mtp-cull · Camera review")
+        .with_maximized(true);
+    #[cfg(feature = "ui-smoke")]
+    let viewport = if std::env::var_os("MTP_CULL_SMOKE_DIR").is_some() {
+        viewport
+            .with_maximized(false)
+            .with_inner_size(egui::vec2(2560.0, 1440.0))
+    } else {
+        viewport
+    };
+    let options = eframe::NativeOptions {
+        viewport,
+        ..Default::default()
+    };
+    eframe::run_native(
+        "mtp-cull",
+        options,
+        Box::new(|cc| {
+            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            let mut app = App::new()?;
+            if let Some((root, raw)) = initial {
+                let (sender, receiver) = mpsc::channel();
+                app.loader = Some(receiver);
+                std::thread::spawn(move || {
+                    let _ =
+                        sender.send(review::scan_local(root, raw).map_err(|e| format!("{e:#}")));
+                });
+            }
+            Ok(Box::new(app))
+        }),
+    )?;
+    Ok(())
+}
+
+struct App {
+    #[cfg(feature = "ui-smoke")]
+    smoke: Option<smoke::Smoke>,
+    store: Store,
+    settings: Settings,
+    draft_settings: Settings,
+    session: Option<Session>,
+    history: History,
+    cache: ImageCache,
+    canvas: Canvas,
+    selected: usize,
+    pinned: Option<usize>,
+    media_filter: Option<Kind>,
+    decision_filter: Option<Decision>,
+    visible: Vec<usize>,
+    demands: Vec<(Key, u8)>,
+    thumbnails: HashMap<Key, egui::TextureHandle>,
+    thumbnail_ticks: HashMap<Key, u64>,
+    thumbnail_tick: u64,
+    features: HashMap<PathBuf, crate::bursts::Feature>,
+    burst_groups: HashMap<usize, u32>,
+    loader: Option<mpsc::Receiver<std::result::Result<Session, String>>>,
+    import: Option<ImportOperation>,
+    worker: Option<MtpWorker>,
+    devices: Vec<MtpDevice>,
+    folders: Vec<SourceFolder>,
+    device: Option<String>,
+    folder: Option<String>,
+    mtp_pending: HashSet<String>,
+    staging_request: Option<(Vec<String>, bool, u64)>,
+    staging_paused: bool,
+    staging_active: bool,
+    staging_text: String,
+    camera_progress: f32,
+    camera_busy: bool,
+    camera_picker: bool,
+    settings_open: bool,
+    import_open: bool,
+    help_open: bool,
+    palette_open: bool,
+    palette_query: String,
+    palette_selection: usize,
+    palette_focus: bool,
+    date: String,
+    message: Option<String>,
+    error: Option<String>,
+    last_direction: isize,
+    frame_ms: f64,
+}
+impl App {
+    fn new() -> Result<Self> {
+        let store = Store::open()?;
+        let settings = store.settings()?;
+        let cache = ImageCache::new(settings.cpu_cache_mib * 1024 * 1024);
+        Ok(Self {
+            #[cfg(feature = "ui-smoke")]
+            smoke: smoke::Smoke::from_environment()?,
+            store,
+            draft_settings: settings.clone(),
+            settings,
+            session: None,
+            history: History::default(),
+            cache,
+            canvas: Canvas::default(),
+            selected: 0,
+            pinned: None,
+            media_filter: Some(Kind::Jpeg),
+            decision_filter: None,
+            visible: Vec::new(),
+            demands: Vec::new(),
+            thumbnails: HashMap::new(),
+            thumbnail_ticks: HashMap::new(),
+            thumbnail_tick: 0,
+            features: HashMap::new(),
+            burst_groups: HashMap::new(),
+            loader: None,
+            import: None,
+            worker: None,
+            devices: Vec::new(),
+            folders: Vec::new(),
+            device: None,
+            folder: None,
+            mtp_pending: HashSet::new(),
+            staging_request: None,
+            staging_paused: false,
+            staging_active: false,
+            staging_text: String::new(),
+            camera_progress: 0.0,
+            camera_busy: false,
+            camera_picker: false,
+            settings_open: false,
+            import_open: false,
+            help_open: false,
+            palette_open: false,
+            palette_query: String::new(),
+            palette_selection: 0,
+            palette_focus: false,
+            date: Local::now().date_naive().to_string(),
+            message: None,
+            error: None,
+            last_direction: 1,
+            frame_ms: 0.0,
+        })
+    }
+    fn save(&self) {
+        self.store.save_settings(&self.settings);
+        if let Some(session) = &self.session {
+            let key = |index: usize| {
+                session
+                    .shots
+                    .get(index)
+                    .and_then(|s| {
+                        s.assets
+                            .iter()
+                            .find(|a| a.kind == Kind::Jpeg)
+                            .or_else(|| s.assets.first())
+                    })
+                    .map(|a| a.key.clone())
+            };
+            self.store.save_review(
+                &session.id,
+                SavedReview {
+                    decisions: session.selections(),
+                    selected: key(self.selected),
+                    pinned: self.pinned.and_then(key),
+                    center: Some([self.canvas.viewport.center.x, self.canvas.viewport.center.y]),
+                    zoom: self.canvas.viewport.zoom,
+                    alignment: [
+                        self.canvas.viewport.alignment.x,
+                        self.canvas.viewport.alignment.y,
+                    ],
+                    mode: self.canvas.mode.label().into(),
+                    threshold: self.canvas.threshold,
+                    opacity: self.canvas.opacity,
+                },
+            );
+        }
+    }
+    fn install(&mut self, mut session: Session) {
+        let mut reconciliation = String::new();
+        let carried=self.session.as_ref().filter(|old|old.id!=session.id && matches!((&old.source,&session.source),(Source::Local{root:a,..},Source::Local{root:b,..}) if a==b)).map(Session::selections);
+        let mut saved = None;
+        match self.store.review(&session.id) {
+            Ok(review) => {
+                let decisions = &review.decisions;
+                let current = session.selections();
+                let missing = decisions
+                    .keys()
+                    .filter(|key| !current.contains_key(*key))
+                    .count();
+                session.restore(decisions);
+                if missing > 0 {
+                    reconciliation = format!(
+                        " {missing} previous asset records could not be matched; review changed files again."
+                    );
+                }
+                saved = Some(review);
+            }
+            Err(error) => self.error = Some(error.to_string()),
+        }
+        if let Some(carried) = carried {
+            session.restore(&carried);
+        }
+        self.session = Some(session);
+        self.selected = 0;
+        self.pinned = None;
+        self.history = History::default();
+        self.cache.clear();
+        self.canvas.reset();
+        if let Some(saved) = saved {
+            let session = self.session.as_ref().unwrap();
+            let index = |key: &Option<String>| {
+                key.as_ref().and_then(|key| {
+                    session
+                        .shots
+                        .iter()
+                        .position(|s| s.assets.iter().any(|a| a.key == *key))
+                })
+            };
+            self.selected = index(&saved.selected).unwrap_or(0);
+            self.pinned = index(&saved.pinned);
+            if let Some(center) = saved.center {
+                self.canvas.viewport.center = egui::vec2(center[0], center[1]);
+            }
+            self.canvas.viewport.zoom = saved.zoom;
+            self.canvas.viewport.alignment = egui::vec2(saved.alignment[0], saved.alignment[1]);
+            self.canvas.mode = match saved.mode.as_str() {
+                "Side by side" => Mode::SideBySide,
+                "Vertical wipe" => Mode::Wipe,
+                _ => Mode::Single,
+            };
+            if saved.threshold > 0 {
+                self.canvas.threshold = saved.threshold;
+                self.canvas.opacity = saved.opacity;
+            }
+        }
+        self.thumbnails.clear();
+        self.thumbnail_ticks.clear();
+        self.features.clear();
+        self.burst_groups.clear();
+        self.mtp_pending.clear();
+        self.staging_request = None;
+        self.staging_paused = false;
+        self.refresh_visible();
+        let ephemeral = self
+            .session
+            .as_ref()
+            .unwrap()
+            .shots
+            .iter()
+            .flat_map(|s| &s.assets)
+            .filter(|a| a.key.starts_with("ephemeral-"))
+            .count();
+        if ephemeral > 0 {
+            reconciliation.push_str(" Camera timestamps are unavailable for some files; their decisions will require review on reconnect.");
+        }
+        self.message = Some(format!(
+            "Use 1 / 2 / Space to choose. Pin A with P, compare with C.{reconciliation}"
+        ));
+    }
+    fn refresh_visible(&mut self) {
+        self.visible = self
+            .session
+            .as_ref()
+            .map(|session| {
+                session
+                    .shots
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, shot)| {
+                        self.media_filter.is_none_or(|kind| shot.has(kind))
+                            && self.decision_filter.is_none_or(|decision| {
+                                shot.decision(
+                                    shot.review_kind(self.media_filter),
+                                    self.settings.link_raw,
+                                ) == decision
+                            })
+                    })
+                    .map(|(i, _)| i)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !self.visible.contains(&self.selected)
+            && let Some(&first) = self.visible.first()
+        {
+            self.selected = first;
+        }
+    }
+    fn navigate(&mut self, direction: isize) {
+        self.last_direction = direction;
+        if let Some(position) = self.visible.iter().position(|i| *i == self.selected) {
+            let next = position
+                .saturating_add_signed(direction)
+                .min(self.visible.len().saturating_sub(1));
+            self.selected = self.visible[next];
+            self.canvas.active_a = false;
+        }
+    }
+    fn decide(&mut self, decision: Decision, bulk: bool) {
+        let indices = if bulk {
+            self.visible.clone()
+        } else {
+            vec![if self.canvas.active_a {
+                self.pinned.unwrap_or(self.selected)
+            } else {
+                self.selected
+            }]
+        };
+        if let Some(session) = &mut self.session {
+            self.history.apply(
+                session,
+                &indices,
+                self.media_filter,
+                self.settings.link_raw,
+                decision,
+            );
+        }
+        self.save();
+        if self.settings.auto_advance && !bulk && !self.canvas.active_a {
+            self.navigate(1);
+        }
+        self.refresh_visible();
+    }
+    fn command(&mut self, command: Command) {
+        match command {
+            Command::Bursts => {
+                self.settings.group_bursts = !self.settings.group_bursts;
+                self.save();
+            }
+            Command::NextBurst | Command::PreviousBurst => {
+                let current = self.burst_groups.get(&self.selected).copied();
+                let direction = if command == Command::NextBurst { 1 } else { -1 };
+                while let Some(position) = self.visible.iter().position(|i| *i == self.selected) {
+                    if (direction == 1 && position + 1 == self.visible.len())
+                        || (direction == -1 && position == 0)
+                    {
+                        break;
+                    }
+                    self.navigate(direction);
+                    if self.burst_groups.get(&self.selected).copied() != current
+                        || current.is_none()
+                    {
+                        break;
+                    }
+                }
+            }
+            Command::FilterUnreviewed
+            | Command::FilterKeep
+            | Command::FilterReject
+            | Command::FilterAll => {
+                self.decision_filter = match command {
+                    Command::FilterUnreviewed => Some(Decision::Unreviewed),
+                    Command::FilterKeep => Some(Decision::Keep),
+                    Command::FilterReject => Some(Decision::Reject),
+                    _ => None,
+                };
+                self.refresh_visible();
+            }
+            Command::PanLeft | Command::PanRight | Command::PanUp | Command::PanDown => {
+                let delta = match command {
+                    Command::PanLeft => egui::vec2(-0.02, 0.0),
+                    Command::PanRight => egui::vec2(0.02, 0.0),
+                    Command::PanUp => egui::vec2(0.0, -0.02),
+                    _ => egui::vec2(0.0, 0.02),
+                };
+                self.canvas.viewport.center += delta;
+            }
+            Command::CenterRegion => {
+                self.canvas.center_region_on_load = true;
+            }
+            Command::RegionLeft
+            | Command::RegionRight
+            | Command::RegionUp
+            | Command::RegionDown => {
+                let delta = match command {
+                    Command::RegionLeft => egui::vec2(-16.0, 0.0),
+                    Command::RegionRight => egui::vec2(16.0, 0.0),
+                    Command::RegionUp => egui::vec2(0.0, -16.0),
+                    _ => egui::vec2(0.0, 16.0),
+                };
+                self.canvas.region = self.canvas.region.map(|r| r.translate(delta));
+            }
+            Command::RegionGrow | Command::RegionShrink => {
+                self.canvas.region = self.canvas.region.map(|r| {
+                    egui::Rect::from_center_size(
+                        r.center(),
+                        (r.size()
+                            * if command == Command::RegionGrow {
+                                1.2
+                            } else {
+                                1.0 / 1.2
+                            })
+                        .max(egui::vec2(4.0, 4.0)),
+                    )
+                });
+            }
+            Command::ThresholdUp => self.canvas.threshold = self.canvas.threshold.saturating_add(2),
+            Command::ThresholdDown => {
+                self.canvas.threshold = self.canvas.threshold.saturating_sub(2).max(1)
+            }
+            Command::OpacityUp => self.canvas.opacity = self.canvas.opacity.saturating_add(16),
+            Command::OpacityDown => self.canvas.opacity = self.canvas.opacity.saturating_sub(16),
+            Command::AlignLeft | Command::AlignRight | Command::AlignUp | Command::AlignDown => {
+                let delta = match command {
+                    Command::AlignLeft => egui::vec2(-8.0, 0.0),
+                    Command::AlignRight => egui::vec2(8.0, 0.0),
+                    Command::AlignUp => egui::vec2(0.0, -8.0),
+                    _ => egui::vec2(0.0, 8.0),
+                };
+                self.canvas.viewport.alignment += delta;
+            }
+            Command::Close => {
+                if self.import.is_some() || self.camera_busy || self.loader.is_some() {
+                    return;
+                }
+                self.save();
+                self.send(MtpRequest::CloseSession);
+                self.session = None;
+                self.loader = None;
+                self.cache.clear();
+                self.canvas.reset();
+                self.thumbnails.clear();
+                self.visible.clear();
+                self.staging_text.clear();
+                self.staging_active = false;
+                self.staging_request = None;
+            }
+            Command::RawFolder => {
+                if self.import.is_some() || self.camera_busy {
+                    return;
+                }
+                if let Some(Session {
+                    source: Source::Local { root, .. },
+                    ..
+                }) = &self.session
+                {
+                    let root = root.clone();
+                    if let Some(raw) = rfd::FileDialog::new()
+                        .set_title("Companion RAW folder")
+                        .pick_folder()
+                    {
+                        self.save();
+                        let previous = self
+                            .session
+                            .as_ref()
+                            .map(Session::selections)
+                            .unwrap_or_default();
+                        let (sender, receiver) = mpsc::channel();
+                        self.loader = Some(receiver);
+                        std::thread::spawn(move || {
+                            let _ = sender.send(
+                                review::scan_local(root, Some(raw))
+                                    .map(|mut session| {
+                                        session.restore(&previous);
+                                        session
+                                    })
+                                    .map_err(|e| format!("{e:#}")),
+                            );
+                        });
+                    }
+                }
+            }
+            Command::Open => {
+                if self.import.is_some() || self.camera_busy {
+                    return;
+                }
+                if let Some(root) = rfd::FileDialog::new()
+                    .set_title("JPEG album or camera staging folder")
+                    .pick_folder()
+                {
+                    self.save();
+                    self.send(MtpRequest::CloseSession);
+                    self.staging_text.clear();
+                    self.staging_active = false;
+                    let raw = None;
+                    let (sender, receiver) = mpsc::channel();
+                    self.loader = Some(receiver);
+                    std::thread::spawn(move || {
+                        let _ = sender
+                            .send(review::scan_local(root, raw).map_err(|e| format!("{e:#}")));
+                    });
+                }
+            }
+            Command::Camera => {
+                if self.import.is_some() || self.camera_busy {
+                    return;
+                }
+                match self
+                    .worker
+                    .as_ref()
+                    .map(|_| Ok(()))
+                    .unwrap_or_else(|| MtpWorker::spawn().map(|worker| self.worker = Some(worker)))
+                {
+                    Ok(()) => {
+                        self.camera_picker = true;
+                        self.send(MtpRequest::ListDevices);
+                    }
+                    Err(error) => self.error = Some(error.to_string()),
+                }
+            }
+            Command::Previous => self.navigate(-1),
+            Command::Next => self.navigate(1),
+            Command::NextUnreviewed => {
+                if let Some(session) = &self.session
+                    && let Some(index) = self
+                        .visible
+                        .iter()
+                        .copied()
+                        .cycle()
+                        .skip_while(|i| *i != self.selected)
+                        .skip(1)
+                        .take(self.visible.len())
+                        .find(|i| {
+                            session.shots[*i].decision(
+                                session.shots[*i].review_kind(self.media_filter),
+                                self.settings.link_raw,
+                            ) == Decision::Unreviewed
+                        })
+                {
+                    self.selected = index;
+                }
+            }
+            Command::Reject => self.decide(Decision::Reject, false),
+            Command::Keep => self.decide(Decision::Keep, false),
+            Command::Clear => self.decide(Decision::Unreviewed, false),
+            Command::ToggleKeep => {
+                let index = if self.canvas.active_a {
+                    self.pinned.unwrap_or(self.selected)
+                } else {
+                    self.selected
+                };
+                let keep = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.shots.get(index))
+                    .is_some_and(|s| {
+                        s.decision(s.review_kind(self.media_filter), self.settings.link_raw)
+                            == Decision::Keep
+                    });
+                self.decide(
+                    if keep {
+                        Decision::Unreviewed
+                    } else {
+                        Decision::Keep
+                    },
+                    false,
+                );
+            }
+            Command::Zoom => {
+                self.canvas.viewport.zoom = if self.canvas.viewport.zoom.is_some() {
+                    None
+                } else {
+                    Some(1.0)
+                }
+            }
+            Command::Pin => {
+                self.pinned = Some(self.selected);
+                self.navigate(1);
+                if self.canvas.mode == Mode::Single {
+                    self.canvas.mode = Mode::SideBySide;
+                }
+            }
+            Command::Compare => {
+                if self.pinned.is_none() {
+                    self.pinned = Some(self.selected);
+                    self.navigate(1);
+                }
+                self.canvas.mode = self.canvas.mode.next();
+            }
+            Command::Blink => {}
+            Command::Swap => {
+                let source = self
+                    .session
+                    .as_ref()
+                    .and_then(|s| s.shots.get(self.selected))
+                    .and_then(|s| s.preview())
+                    .and_then(|p| self.cache.source_size(p));
+                if let Some(source) = source {
+                    let alignment = self.canvas.viewport.alignment;
+                    self.canvas.region = self.canvas.region.map(|r| r.translate(alignment));
+                    self.canvas
+                        .viewport
+                        .swap(egui::vec2(source[0] as f32, source[1] as f32));
+                }
+                if let Some(a) = self.pinned.replace(self.selected) {
+                    self.selected = a;
+                    self.canvas.active_a = !self.canvas.active_a;
+                }
+            }
+            Command::ActivePane => {
+                if self.pinned.is_some() {
+                    self.canvas.active_a = !self.canvas.active_a;
+                }
+            }
+            Command::Peaking => self.canvas.peaking = !self.canvas.peaking,
+            Command::Region => self.canvas.region_tool = !self.canvas.region_tool,
+            Command::ClearRegion => {
+                self.canvas.region = None;
+                self.canvas.region_tool = false;
+                self.canvas.center_region_on_load = false;
+            }
+            Command::DividerLeft => self.canvas.divider = (self.canvas.divider - 0.05).max(0.0),
+            Command::DividerRight => self.canvas.divider = (self.canvas.divider + 0.05).min(1.0),
+            Command::DividerCenter => self.canvas.divider = 0.5,
+            Command::ResetAlignment => self.canvas.viewport.alignment = egui::Vec2::ZERO,
+            Command::Undo | Command::Redo => {
+                if let Some(session) = &mut self.session {
+                    if command == Command::Undo {
+                        self.history.undo(session);
+                    } else {
+                        self.history.redo(session);
+                    }
+                }
+                self.save();
+                self.refresh_visible();
+            }
+            Command::Jpeg => {
+                self.media_filter = Some(Kind::Jpeg);
+                self.refresh_visible();
+            }
+            Command::Raw => {
+                self.media_filter = Some(Kind::Raw);
+                self.refresh_visible();
+            }
+            Command::Video => {
+                self.media_filter = Some(Kind::Video);
+                self.refresh_visible();
+            }
+            Command::All => {
+                self.media_filter = None;
+                self.refresh_visible();
+            }
+            Command::BulkKeep => self.decide(Decision::Keep, true),
+            Command::BulkReject => self.decide(Decision::Reject, true),
+            Command::Import => {
+                if self.import.is_none() && !self.camera_busy && self.loader.is_none() {
+                    self.import_open = true;
+                }
+            }
+            Command::Settings => {
+                self.draft_settings = self.settings.clone();
+                self.settings_open = true;
+            }
+            Command::Help => self.help_open = !self.help_open,
+            Command::Palette => {
+                self.palette_open = !self.palette_open;
+                self.palette_query.clear();
+                self.palette_selection = 0;
+                self.palette_focus = true;
+            }
+            Command::Retry => {
+                self.cache.retry();
+                self.mtp_pending.clear();
+                self.send(MtpRequest::Retry);
+                self.staging_paused = false;
+                self.staging_request = None;
+            }
+            Command::Pause => {
+                self.staging_paused = !self.staging_paused;
+                self.staging_request = None;
+            }
+            Command::Cancel => {
+                let modal = self.settings_open
+                    || self.import_open
+                    || self.help_open
+                    || self.palette_open
+                    || self.camera_picker;
+                if !modal || self.camera_busy || self.import.is_some() {
+                    if let Some(import) = &self.import {
+                        import.cancel.store(true, Ordering::Relaxed);
+                    }
+                    self.staging_paused = true;
+                    if self.camera_picker && self.camera_busy {
+                        self.send(MtpRequest::CloseSession);
+                        self.camera_busy = false;
+                    } else {
+                        self.send(MtpRequest::Cancel);
+                    }
+                }
+                self.settings_open = false;
+                self.import_open = false;
+                self.help_open = false;
+                self.palette_open = false;
+                self.camera_picker = false;
+            }
+        }
+    }
+    fn send(&mut self, request: MtpRequest) {
+        if let Some(worker) = &self.worker
+            && let Err(error) = worker.send(request)
+        {
+            self.error = Some(error.to_string());
+        }
+    }
+    fn poll(&mut self) {
+        if let Some(loader) = &self.loader {
+            match loader.try_recv() {
+                Ok(Ok(session)) => {
+                    self.loader = None;
+                    self.install(session);
+                }
+                Ok(Err(error)) => {
+                    self.loader = None;
+                    self.error = Some(error);
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.loader = None;
+                    self.error = Some("Folder indexer stopped".into());
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        let mut events = Vec::new();
+        if let Some(worker) = &self.worker {
+            while let Some(event) = worker.try_recv() {
+                events.push(event);
+            }
+        }
+        for event in events {
+            match event {
+                MtpEvent::Devices(devices) => self.devices = devices,
+                MtpEvent::SourceFolders { device_id, folders } => {
+                    if self.device.as_ref() == Some(&device_id) {
+                        self.folders = folders;
+                    }
+                }
+                MtpEvent::SessionScanned(session) => {
+                    self.camera_busy = false;
+                    self.camera_picker = false;
+                    self.install(Session::from_remote(session));
+                }
+                MtpEvent::PreviewCached {
+                    shot_id,
+                    preview_path,
+                } => {
+                    self.mtp_pending.remove(&shot_id);
+                    if let Some(session) = &mut self.session
+                        && let Some(shot) = session.shots.iter_mut().find(|s| s.id == shot_id)
+                    {
+                        for asset in shot.assets.iter_mut().filter(|a| a.kind == Kind::Jpeg) {
+                            asset.path = preview_path.clone();
+                        }
+                    }
+                }
+                MtpEvent::PreviewFailed { shot_id, message } => {
+                    self.mtp_pending.remove(&shot_id);
+                    self.error = Some(message);
+                }
+                MtpEvent::ImportFinished {
+                    copied,
+                    skipped_existing,
+                } => {
+                    self.camera_busy = false;
+                    self.message = Some(format!(
+                        "Imported {copied} files; {skipped_existing} already present"
+                    ));
+                }
+                MtpEvent::Error { operation, message } => {
+                    self.camera_busy = false;
+                    self.error = Some(format!("{operation}: {message}"));
+                }
+                MtpEvent::Progress {
+                    operation,
+                    name,
+                    done,
+                    total,
+                } => {
+                    self.camera_progress = if total == 0 {
+                        1.0
+                    } else {
+                        done as f32 / total as f32
+                    };
+                    self.message = Some(format!("{operation}: {name}"));
+                }
+                MtpEvent::Staging {
+                    ready,
+                    total,
+                    bytes,
+                    paused,
+                } => {
+                    self.staging_active = ready < total && !paused;
+                    self.staging_text = format!(
+                        "{ready}/{total} JPEGs staged · {:.1} GiB{}",
+                        bytes as f64 / 1073741824.0,
+                        if paused { " · paused" } else { "" }
+                    );
+                }
+            }
+        }
+        if let Some(import) = &mut self.import {
+            let mut finished = None;
+            while let Ok(update) = import.receiver.try_recv() {
+                match update {
+                    ImportUpdate::Progress { name, done, total } => {
+                        import.text = name;
+                        import.progress = if total == 0 {
+                            1.0
+                        } else {
+                            done as f32 / total as f32
+                        };
+                    }
+                    ImportUpdate::Finished(result) => finished = Some(result),
+                }
+            }
+            if let Some(result) = finished {
+                self.import = None;
+                match result {
+                    Ok((copied, skipped)) => {
+                        self.message = Some(format!(
+                            "Imported {copied} files; {skipped} already present"
+                        ))
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+            }
+        }
+        if let Some(error) = self.store.error() {
+            self.error = Some(error);
+        }
+    }
+    fn shortcut(&self, spec: &review_commands::Spec) -> Option<egui::KeyboardShortcut> {
+        review_commands::parse(
+            self.settings
+                .bindings
+                .get(spec.id)
+                .map_or(spec.key, String::as_str),
+        )
+    }
+    fn button_text(&self, label: &str, command: Command) -> String {
+        COMMANDS.iter().find(|s| s.command == command).map_or_else(
+            || label.into(),
+            |s| {
+                format!(
+                    "{label} [{}]",
+                    self.settings
+                        .bindings
+                        .get(s.id)
+                        .map_or(s.key, String::as_str)
+                )
+            },
+        )
+    }
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        if self.settings_open
+            || self.import_open
+            || self.camera_picker
+            || self.help_open
+            || self.palette_open
+        {
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.command(Command::Cancel);
+            }
+            return;
+        }
+        if ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let commands: Vec<_> = COMMANDS
+            .iter()
+            .filter(|s| s.command != Command::Blink)
+            .filter_map(|s| {
+                self.shortcut(s)
+                    .filter(|key| ctx.input_mut(|i| review_commands::consume(&mut i.events, key)))
+                    .map(|_| s.command)
+            })
+            .collect();
+        for command in commands {
+            self.command(command);
+        }
+    }
+    fn view_image(&self, index: usize, edge: u32) -> ViewImage {
+        let shot = self.session.as_ref().and_then(|s| s.shots.get(index));
+        let path = shot.and_then(|s| s.preview()).map(|p| p.to_owned());
+        ViewImage {
+            name: shot.map_or_else(|| "No image".into(), |s| s.name.clone()),
+            key: path.clone().map(|p| {
+                if self.canvas.native() {
+                    if self.canvas.needs_focus() {
+                        Key::focus(p)
+                    } else {
+                        Key::native(p)
+                    }
+                } else {
+                    Key::fit(p, edge)
+                }
+            }),
+            fallback: path.map(|p| Key::fit(p, edge)),
+        }
+    }
+    fn plan_demands(&mut self, edge: u32) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let selected_position = self
+            .visible
+            .iter()
+            .position(|i| *i == self.selected)
+            .unwrap_or(0);
+        let mut indices = Vec::new();
+        if let Some(a) = self.pinned {
+            indices.push((a, 0));
+        }
+        indices.push((self.selected, 0));
+        for offset in 1..=8 {
+            for direction in [self.last_direction, -self.last_direction] {
+                let position = selected_position.saturating_add_signed(direction * offset);
+                if let Some(index) = self.visible.get(position) {
+                    indices.push((
+                        *index,
+                        if direction == self.last_direction {
+                            1
+                        } else {
+                            2
+                        },
+                    ));
+                }
+            }
+        }
+        let mut fetch = Vec::new();
+        for (index, priority) in indices {
+            if let Some(shot) = session.shots.get(index) {
+                if let Some(path) = shot.preview() {
+                    self.demands
+                        .push((Key::fit(path.to_owned(), edge), priority));
+                    // Native buffers are large. Keep neighbors inside the configured tier.
+                    let native_slots =
+                        (self.settings.cpu_cache_mib * 1024 * 1024 * 3 / 4 / (160 * 1024 * 1024))
+                            .saturating_sub(2)
+                            / 2;
+                    let focus_neighbor = self.canvas.needs_focus()
+                        && (priority == 0
+                            || self
+                                .visible
+                                .iter()
+                                .position(|i| *i == index)
+                                .is_some_and(|p| p.abs_diff(selected_position) <= 2));
+                    if self.canvas.native()
+                        && !focus_neighbor
+                        && (priority == 0
+                            || self
+                                .visible
+                                .iter()
+                                .position(|i| *i == index)
+                                .is_some_and(|p| {
+                                    p.abs_diff(selected_position) <= native_slots.min(8)
+                                }))
+                    {
+                        self.demands.push((Key::native(path.to_owned()), priority));
+                    }
+                    if focus_neighbor {
+                        self.demands.push((Key::focus(path.to_owned()), priority));
+                    }
+                }
+                if matches!(session.source, Source::Mtp { .. }) && shot.has(Kind::Jpeg) {
+                    fetch.push(shot.id.clone());
+                }
+            }
+        }
+        if self.settings.group_bursts {
+            let before = self.features.len();
+            for shot in &session.shots {
+                if let Some(path) = shot.preview() {
+                    let key = Key::fit(path.to_owned(), 512);
+                    if let Some(feature) = self.cache.feature(&key) {
+                        self.features.insert(path.to_owned(), feature);
+                    }
+                    if !self.features.contains_key(path) {
+                        self.demands.push((key, 4));
+                    }
+                }
+            }
+            if before != self.features.len() || self.burst_groups.is_empty() {
+                self.burst_groups = crate::bursts::group(
+                    &session.shots,
+                    &self.features,
+                    self.settings.burst_window_ms,
+                    self.settings.burst_distance,
+                );
+            }
+        } else {
+            self.burst_groups.clear();
+        }
+        let request = (
+            fetch,
+            self.staging_paused || self.camera_busy,
+            self.settings.disk_cache_gib * 1024 * 1024 * 1024,
+        );
+        if matches!(session.source, Source::Mtp { .. })
+            && self.staging_request.as_ref() != Some(&request)
+        {
+            self.send(MtpRequest::SetPriority {
+                shot_ids: request.0.clone(),
+                paused: request.1,
+                disk_limit: request.2,
+            });
+            self.staging_request = Some(request);
+        }
+    }
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.strong("mtp-cull");
+            for (text, command) in [
+                ("Open folder", Command::Open),
+                ("Camera", Command::Camera),
+                ("Import selected", Command::Import),
+                ("Settings", Command::Settings),
+                ("Help", Command::Help),
+                ("Close", Command::Close),
+            ] {
+                if ui.button(text).clicked() {
+                    self.command(command);
+                }
+            }
+            ui.separator();
+            for (kind, label) in [
+                (Some(Kind::Jpeg), "JPEG"),
+                (Some(Kind::Raw), "RAW"),
+                (Some(Kind::Video), "Video"),
+                (None, "All"),
+            ] {
+                if ui
+                    .selectable_label(self.media_filter == kind, label)
+                    .clicked()
+                {
+                    self.media_filter = kind;
+                    self.refresh_visible();
+                }
+            }
+            ui.separator();
+            for (filter, label) in [
+                (None, "All decisions"),
+                (Some(Decision::Unreviewed), "Unreviewed"),
+                (Some(Decision::Keep), "Kept"),
+                (Some(Decision::Reject), "Rejected"),
+            ] {
+                if ui
+                    .selectable_label(self.decision_filter == filter, label)
+                    .clicked()
+                {
+                    self.decision_filter = filter;
+                    self.refresh_visible();
+                }
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            for (label, command) in [
+                ("Reject", Command::Reject),
+                ("Keep", Command::Keep),
+                ("Clear", Command::Clear),
+                ("Undo", Command::Undo),
+                ("Pin A", Command::Pin),
+                ("Fit / 100%", Command::Zoom),
+            ] {
+                if ui.button(self.button_text(label, command)).clicked() {
+                    self.command(command);
+                }
+            }
+            for mode in [Mode::Single, Mode::SideBySide, Mode::Wipe] {
+                if ui
+                    .selectable_label(self.canvas.mode == mode, mode.label())
+                    .clicked()
+                {
+                    if mode != Mode::Single && self.pinned.is_none() {
+                        self.command(Command::Pin);
+                    }
+                    self.canvas.mode = mode;
+                }
+            }
+            let focus_label = self.button_text("Focus", Command::Peaking);
+            let region_label = self.button_text("Region", Command::Region);
+            ui.checkbox(&mut self.canvas.peaking, focus_label);
+            ui.checkbox(&mut self.canvas.region_tool, region_label);
+            if self.canvas.peaking {
+                ui.add(egui::Slider::new(&mut self.canvas.threshold, 1..=100).text("Threshold"));
+                ui.add(egui::Slider::new(&mut self.canvas.opacity, 20..=240).text("Opacity"));
+            }
+        });
+    }
+    fn filmstrip(&mut self, ui: &mut egui::Ui) {
+        let mut pins = HashSet::new();
+        let visible = self.visible.clone();
+        let Some(session) = &self.session else {
+            return;
+        };
+        egui::ScrollArea::horizontal()
+            .id_salt("filmstrip")
+            .show_viewport(ui, |ui, viewport| {
+                let width = 112.0;
+                let total = visible.len() as f32 * width;
+                ui.set_min_size(egui::vec2(total, 115.0));
+                let first = (viewport.min.x / width).floor().max(0.0) as usize;
+                let end = ((viewport.max.x / width).ceil() as usize + 1).min(visible.len());
+                let origin = ui.min_rect().min;
+                let mut chosen = None;
+                for (position, &index) in visible.iter().enumerate().take(end).skip(first) {
+                    let shot = &session.shots[index];
+                    let rect = egui::Rect::from_min_size(
+                        origin + egui::vec2(position as f32 * width, 0.0),
+                        egui::vec2(width - 4.0, 110.0),
+                    );
+                    let response =
+                        ui.interact(rect, ui.id().with(("shot", index)), egui::Sense::click());
+                    if response.clicked() {
+                        chosen = Some(index);
+                    }
+                    let color = decision_color(
+                        shot.decision(shot.review_kind(self.media_filter), self.settings.link_raw),
+                    );
+                    ui.painter().rect_filled(
+                        rect,
+                        4.0,
+                        if index == self.selected {
+                            egui::Color32::from_rgb(42, 61, 82)
+                        } else {
+                            egui::Color32::from_rgb(27, 30, 35)
+                        },
+                    );
+                    ui.painter().rect_stroke(
+                        rect,
+                        4.0,
+                        egui::Stroke::new(if index == self.selected { 2.0 } else { 1.0 }, color),
+                        egui::StrokeKind::Inside,
+                    );
+                    if let Some(path) = shot.preview() {
+                        let key = Key::fit(path.to_owned(), 192);
+                        pins.insert(key.clone());
+                        self.thumbnail_tick += 1;
+                        self.thumbnail_ticks
+                            .insert(key.clone(), self.thumbnail_tick);
+                        self.demands.push((key.clone(), 3));
+                        if !self.thumbnails.contains_key(&key)
+                            && let Some(picture) = self.cache.get(&key)
+                        {
+                            self.thumbnails.insert(
+                                key.clone(),
+                                ui.ctx().load_texture(
+                                    format!("thumb:{}", path.display()),
+                                    picture.image.clone(),
+                                    egui::TextureOptions::LINEAR,
+                                ),
+                            );
+                        }
+                        if let Some(texture) = self.thumbnails.get(&key) {
+                            let area = rect.shrink2(egui::vec2(6.0, 20.0));
+                            let image_size = texture.size_vec2();
+                            let scale =
+                                (area.width() / image_size.x).min(area.height() / image_size.y);
+                            let image_rect =
+                                egui::Rect::from_center_size(area.center(), image_size * scale);
+                            ui.painter().image(
+                                texture.id(),
+                                image_rect,
+                                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                                egui::Color32::WHITE,
+                            );
+                        }
+                    }
+                    ui.painter().text(
+                        rect.left_top() + egui::vec2(5.0, 4.0),
+                        egui::Align2::LEFT_TOP,
+                        &shot.name,
+                        egui::FontId::proportional(12.0),
+                        egui::Color32::WHITE,
+                    );
+                    let detail = format!(
+                        "{}{}{}",
+                        self.burst_groups
+                            .get(&index)
+                            .map(|id| format!("B{id} · "))
+                            .unwrap_or_default(),
+                        if self.pinned == Some(index) {
+                            "A · "
+                        } else {
+                            ""
+                        },
+                        if shot.conflict() {
+                            "PAIR CONFLICT"
+                        } else {
+                            shot.decision(
+                                shot.review_kind(self.media_filter),
+                                self.settings.link_raw,
+                            )
+                            .label()
+                        }
+                    );
+                    ui.painter().text(
+                        rect.left_bottom() + egui::vec2(5.0, -4.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        detail,
+                        egui::FontId::proportional(11.0),
+                        color,
+                    );
+                    response.on_hover_text(
+                        shot.assets
+                            .iter()
+                            .map(|a| format!("{} · {} · {} bytes", a.name, a.kind.label(), a.size))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
+                }
+                if let Some(index) = chosen {
+                    self.selected = index;
+                    self.canvas.active_a = false;
+                }
+            });
+        while self.thumbnails.len() > 256 {
+            let oldest = self
+                .thumbnail_ticks
+                .iter()
+                .filter(|(key, _)| !pins.contains(*key))
+                .min_by_key(|(_, tick)| *tick)
+                .map(|(key, _)| key.clone());
+            if let Some(key) = oldest {
+                self.thumbnails.remove(&key);
+                self.thumbnail_ticks.remove(&key);
+            } else {
+                break;
+            }
+        }
+    }
+    fn dialogs(&mut self, ctx: &egui::Context) {
+        if self.settings_open {
+            let mut open = true;
+            egui::Window::new("Settings and shortcuts").open(&mut open).default_width(650.0).show(ctx,|ui|{
+                ui.checkbox(&mut self.draft_settings.link_raw,"Link JPEG selections to corresponding RAW files");
+                ui.small("Independent RAW choices are retained when linking is on and restored when it is off.");
+                ui.checkbox(&mut self.draft_settings.include_videos,"Include selected videos in import (default on)");
+                ui.checkbox(&mut self.draft_settings.auto_advance,"Advance after deciding candidate B");
+                ui.checkbox(&mut self.draft_settings.group_bursts,"Group similar captures into bursts (background)");
+                ui.add(egui::Slider::new(&mut self.draft_settings.burst_window_ms,100..=10000).text("Burst interval ms"));
+                ui.add(egui::Slider::new(&mut self.draft_settings.burst_distance,0..=32).text("Burst similarity distance"));
+                if let Some(session)=&self.session {ui.label(format!("Import with these settings: {} assets",session.selected_ids(&self.draft_settings).len()));}
+                ui.add(egui::Slider::new(&mut self.draft_settings.cpu_cache_mib,256..=16384).text("CPU cache MiB"));
+                ui.add(egui::Slider::new(&mut self.draft_settings.gpu_cache_mib,128..=2048).text("GPU cache MiB"));
+                ui.add(egui::Slider::new(&mut self.draft_settings.disk_cache_gib,1..=128).text("Staging disk quota GiB"));
+                egui::ScrollArea::vertical().max_height(340.0).show(ui,|ui|{
+                    for spec in COMMANDS {
+                        ui.horizontal(|ui|{
+                            ui.label(spec.label);
+                            let binding=self.draft_settings.bindings.entry(spec.id.into()).or_insert_with(||spec.key.into());
+                            ui.text_edit_singleline(binding);
+                        });
+                    }
+                });
+                if let Err(error)=review_commands::validate(&self.draft_settings.bindings){ui.colored_label(egui::Color32::LIGHT_RED,error);}
+                if ui.button("Save").clicked() && review_commands::validate(&self.draft_settings.bindings).is_ok() {
+                    self.settings=self.draft_settings.clone();self.save();self.refresh_visible();self.settings_open=false;
+                    self.burst_groups.clear();
+                }
+            });
+            if !open {
+                self.settings_open = false;
+            }
+        }
+        if self.help_open {
+            let mut open = true;
+            egui::Window::new("Keyboard and comparison help").open(&mut open).show(ctx,|ui|{
+                ui.label("Wheel: zoom at cursor · Drag: shared pan · Alt+drag B: manual alignment");
+                ui.label("Pin A, browse B; Tab selects which pane receives Keep/Reject.");
+                ui.label("Region mode: drag a crop. Focus scores are hints, not automatic decisions.");
+                egui::ScrollArea::vertical().max_height(500.0).show(ui,|ui|{
+                    for spec in COMMANDS{ui.horizontal(|ui|{ui.monospace(self.settings.bindings.get(spec.id).map_or(spec.key,String::as_str));ui.label(spec.label);});}
+                });
+            });
+            self.help_open = open;
+        }
+        if self.palette_open {
+            let mut chosen = None;
+            let mut open = true;
+            egui::Window::new("Commands")
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    let (submit, down, up) = ui.input(|i| {
+                        (
+                            i.key_pressed(egui::Key::Enter),
+                            i.key_pressed(egui::Key::ArrowDown),
+                            i.key_pressed(egui::Key::ArrowUp),
+                        )
+                    });
+                    let response = ui.text_edit_singleline(&mut self.palette_query);
+                    if self.palette_focus {
+                        response.request_focus();
+                        self.palette_focus = false;
+                    }
+                    if response.changed() {
+                        self.palette_selection = 0;
+                    }
+                    let matching = COMMANDS
+                        .iter()
+                        .filter(|s| {
+                            s.label
+                                .to_lowercase()
+                                .contains(&self.palette_query.to_lowercase())
+                        })
+                        .collect::<Vec<_>>();
+                    if down {
+                        self.palette_selection = self.palette_selection.saturating_add(1);
+                    }
+                    if up {
+                        self.palette_selection = self.palette_selection.saturating_sub(1);
+                    }
+                    self.palette_selection =
+                        self.palette_selection.min(matching.len().saturating_sub(1));
+                    if submit {
+                        chosen = matching.get(self.palette_selection).map(|s| s.command);
+                    }
+                    ui.small("Type to filter · Up/Down to choose · Enter to run · Escape to close");
+                    egui::ScrollArea::vertical()
+                        .max_height(420.0)
+                        .show(ui, |ui| {
+                            for (index, spec) in matching.iter().enumerate() {
+                                if ui
+                                    .selectable_label(
+                                        index == self.palette_selection,
+                                        format!(
+                                            "{}    {}",
+                                            spec.label,
+                                            self.settings
+                                                .bindings
+                                                .get(spec.id)
+                                                .map_or(spec.key, String::as_str)
+                                        ),
+                                    )
+                                    .clicked()
+                                {
+                                    chosen = Some(spec.command);
+                                }
+                            }
+                        });
+                });
+            self.palette_open = open;
+            if let Some(command) = chosen {
+                self.palette_open = false;
+                self.command(command);
+            }
+        }
+        self.camera_dialog(ctx);
+        self.import_dialog(ctx);
+    }
+    fn camera_dialog(&mut self, ctx: &egui::Context) {
+        if !self.camera_picker {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Camera source")
+            .open(&mut open)
+            .show(ctx, |ui| {
+                for device in self.devices.clone() {
+                    if ui
+                        .selectable_label(self.device.as_ref() == Some(&device.id), &device.name)
+                        .clicked()
+                    {
+                        self.device = Some(device.id.clone());
+                        self.folder = None;
+                        self.folders.clear();
+                        self.send(MtpRequest::ListSourceFolders {
+                            device_id: device.id,
+                        });
+                    }
+                }
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for folder in &self.folders {
+                            if ui
+                                .selectable_label(
+                                    self.folder.as_ref() == Some(&folder.id),
+                                    &folder.path,
+                                )
+                                .clicked()
+                            {
+                                self.folder = Some(folder.id.clone());
+                            }
+                        }
+                    });
+                if self.camera_busy {
+                    ui.spinner();
+                    ui.label("Indexing camera…");
+                }
+                if ui
+                    .add_enabled(
+                        !self.camera_busy && self.device.is_some() && self.folder.is_some(),
+                        egui::Button::new("Start review"),
+                    )
+                    .clicked()
+                {
+                    self.save();
+                    self.camera_busy = true;
+                    self.send(MtpRequest::StartSession {
+                        device_id: self.device.clone().unwrap(),
+                        source_folder_id: self.folder.clone().unwrap(),
+                    });
+                }
+            });
+        self.camera_picker = open;
+    }
+    fn import_dialog(&mut self, ctx: &egui::Context) {
+        if !self.import_open {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Import selected originals")
+            .open(&mut open)
+            .default_width(650.0)
+            .show(ctx, |ui| {
+                folder_field(ui, "JPEG destination", &mut self.settings.picture_root);
+                folder_field(ui, "RAW destination", &mut self.settings.raw_root);
+                folder_field(ui, "Video destination", &mut self.settings.video_root);
+                ui.horizontal(|ui| {
+                    ui.label("Album");
+                    ui.text_edit_singleline(&mut self.settings.album);
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Date");
+                    ui.text_edit_singleline(&mut self.date);
+                });
+                ui.checkbox(&mut self.settings.include_videos, "Include videos");
+                let selected = self
+                    .session
+                    .as_ref()
+                    .map(|s| s.selected_ids(&self.settings))
+                    .unwrap_or_default();
+                let mut counts = [0_usize; 4];
+                let mut unreviewed = 0;
+                if let Some(session) = &self.session {
+                    let conflicts=session.shots.iter().filter(|s|s.conflict()).count();
+                    let missing=session.shots.iter().filter(|s|s.has(Kind::Jpeg) && !s.has(Kind::Raw)).count();
+                    if conflicts>0 {ui.colored_label(egui::Color32::YELLOW,format!("{conflicts} ambiguous JPEG/RAW pairs excluded. Resolve duplicate stems in the source folders before importing."));}
+                    if self.settings.link_raw && missing>0 {ui.label(format!("{missing} JPEGs have no RAW companion."));}
+                    for shot in &session.shots {
+                        for asset in &shot.assets {
+                            if selected.contains(&asset.id) {
+                                counts[match asset.kind {
+                                    Kind::Jpeg => 0,
+                                    Kind::Raw => 1,
+                                    Kind::Video => 2,
+                                    Kind::Other => 3,
+                                }] += 1;
+                            }
+                            if asset.kind == Kind::Jpeg && asset.decision == Decision::Unreviewed {
+                                unreviewed += 1;
+                            }
+                        }
+                    }
+                }
+                ui.label(format!(
+                    "{} JPEG · {} RAW · {} video · {} other",
+                    counts[0], counts[1], counts[2], counts[3]
+                ));
+                ui.label(format!(
+                    "{unreviewed} unreviewed JPEGs excluded. Originals on the source remain intact."
+                ));
+                if ui
+                    .add_enabled(
+                        !selected.is_empty() && self.import.is_none() && !self.camera_busy && self.loader.is_none(),
+                        egui::Button::new("Copy selected files"),
+                    )
+                    .clicked()
+                {
+                    self.start_import(selected);
+                    self.import_open = false;
+                }
+            });
+        if !open {
+            self.import_open = false;
+        }
+    }
+    fn start_import(&mut self, selected: Vec<String>) {
+        self.save();
+        let destinations = match self.destinations() {
+            Ok(d) => d,
+            Err(error) => {
+                self.error = Some(error.to_string());
+                return;
+            }
+        };
+        let Some(session) = &self.session else {
+            return;
+        };
+        if matches!(session.source, Source::Mtp { .. }) {
+            self.camera_busy = true;
+            self.send(MtpRequest::ImportAssets {
+                object_ids: selected,
+                destinations,
+            });
+            return;
+        }
+        let assets = session
+            .shots
+            .iter()
+            .flat_map(|s| &s.assets)
+            .filter(|a| selected.contains(&a.id))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.import = Some(crate::imports::start(assets, destinations));
+    }
+
+    fn destinations(&self) -> Result<ImportPaths> {
+        let date = NaiveDate::parse_from_str(&self.date, "%Y-%m-%d")?;
+        Ok(ImportPaths {
+            pictures: optional_path(&self.settings.picture_root),
+            raw: optional_path(&self.settings.raw_root),
+            videos: optional_path(&self.settings.video_root),
+            date,
+            album_name: (!self.settings.album.trim().is_empty())
+                .then(|| self.settings.album.trim().to_owned()),
+        })
+    }
+}
+impl eframe::App for App {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let start = Instant::now();
+        let ctx = ui.ctx().clone();
+        self.poll();
+        self.shortcuts(&ctx);
+        self.demands.clear();
+        self.cache
+            .set_budget(self.settings.cpu_cache_mib * 1024 * 1024);
+        self.canvas
+            .set_budget(self.settings.gpu_cache_mib * 1024 * 1024);
+        let edge = (ctx.content_rect().height() * ctx.pixels_per_point())
+            .ceil()
+            .clamp(800.0, 4320.0) as u32;
+        // The edge must accommodate the landscape image width at the display's height.
+        let edge = (edge * 3 / 2).div_ceil(128) * 128;
+        self.plan_demands(edge);
+        let pins = self
+            .demands
+            .iter()
+            .filter(|(_, priority)| *priority == 0)
+            .map(|(key, _)| key.clone())
+            .collect();
+        self.cache.poll(&pins);
+        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
+        egui::Panel::bottom("status").show(ui, |ui| {
+            if let Some(import) = &self.import {
+                ui.add(egui::ProgressBar::new(import.progress).text(&import.text));
+                if ui.button("Cancel import").clicked() {
+                    self.command(Command::Cancel);
+                }
+            }
+            if self.camera_busy || self.loader.is_some() {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Working…");
+                });
+            }
+            if self.camera_busy {
+                ui.add(egui::ProgressBar::new(self.camera_progress));
+                if ui.button("Cancel operation").clicked() {
+                    self.command(Command::Cancel);
+                }
+            }
+            if !self.staging_text.is_empty() {
+                ui.label(&self.staging_text);
+                if self.staging_active && !self.camera_busy {
+                    ui.add(egui::ProgressBar::new(self.camera_progress).desired_height(3.0));
+                }
+            }
+            if let Some(session) = &self.session {
+                match &session.source {
+                    Source::Local { root, raw } => {
+                        ui.small(format!(
+                            "Source: {}{}",
+                            root.display(),
+                            raw.as_ref()
+                                .map(|p| format!(" · RAW {}", p.display()))
+                                .unwrap_or_default()
+                        ));
+                    }
+                    Source::Mtp { device, folder } => {
+                        let name = self
+                            .devices
+                            .iter()
+                            .find(|d| d.id == *device)
+                            .map_or("Camera", |d| d.name.as_str());
+                        let path = self
+                            .folders
+                            .iter()
+                            .find(|f| f.id == *folder)
+                            .map_or("Selected folder", |f| f.path.as_str());
+                        ui.small(format!("Source: {name} · {path}"));
+                    }
+                }
+            }
+            if let Some(error) = self.error.clone() {
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                    if ui.small_button("Dismiss").clicked() {
+                        self.error = None;
+                    }
+                });
+            }
+            if let Some(message) = &self.message {
+                ui.label(message);
+            }
+            ui.small(format!(
+                "{} visible · CPU {:.0} MiB · GPU {:.0} MiB · UI {:.1} ms · mean decode {:.1} ms",
+                self.visible.len(),
+                self.cache.bytes() as f64 / 1048576.0,
+                self.canvas.bytes() as f64 / 1048576.0,
+                self.frame_ms,
+                self.cache.stats.decode_ms / self.cache.stats.decodes.max(1) as f64
+            ));
+        });
+        egui::Panel::bottom("filmstrip")
+            .exact_size(125.0)
+            .show(ui, |ui| self.filmstrip(ui));
+        egui::CentralPanel::default().show(ui,|ui|{
+            if self.session.is_none(){
+                ui.centered_and_justified(|ui|{ui.vertical_centered(|ui|{
+                    ui.heading("Review on the big screen");
+                    ui.label("Open a JPEG folder or connect the camera. Select the keepers, then import originals.");
+                    ui.label("JPEG + RAW linked by default · Videos included by default");
+                });});
+            }else if self.visible.is_empty(){ui.centered_and_justified(|ui|{ui.label("No images match the current filters.");});}
+            else{
+                let a=self.pinned.map(|index|self.view_image(index,edge));
+                let b=self.view_image(self.selected,edge);
+                let blink=!ctx.egui_wants_keyboard_input() && !self.settings_open && !self.import_open && !self.camera_picker && !self.palette_open &&
+                    COMMANDS.iter().find(|s|s.command==Command::Blink).and_then(|s|self.shortcut(s)).is_some_and(|s|ctx.input(|i|i.key_down(s.logical_key) && i.modifiers.matches_exact(s.modifiers)));
+                #[cfg(feature="ui-smoke")]
+                let blink=blink || self.smoke.as_ref().is_some_and(|s|s.blink);
+                self.canvas.show(ui,&mut self.cache,a,b,blink);
+            }
+        });
+        self.dialogs(&ctx);
+        if let Some(session) = &self.session {
+            let native = self.canvas.native();
+            let focus = self.canvas.needs_focus();
+            let position = self
+                .visible
+                .iter()
+                .position(|i| *i == self.selected)
+                .unwrap_or(0);
+            let keys = (1..=2)
+                .filter_map(|offset| position.checked_add_signed(self.last_direction * offset))
+                .filter_map(|p| self.visible.get(p))
+                .filter_map(|i| session.shots[*i].preview())
+                .map(|p| {
+                    if native {
+                        if focus {
+                            Key::focus(p.to_owned())
+                        } else {
+                            Key::native(p.to_owned())
+                        }
+                    } else {
+                        Key::fit(p.to_owned(), edge)
+                    }
+                });
+            self.canvas.prefetch(&ctx, &mut self.cache, keys);
+        }
+        self.cache.demand(std::mem::take(&mut self.demands));
+        if self.cache.pending()
+            || self.loader.is_some()
+            || self.import.is_some()
+            || self.camera_busy
+            || self.staging_active
+            || !self.mtp_pending.is_empty()
+        {
+            ctx.request_repaint_after(Duration::from_millis(10));
+        }
+        self.frame_ms = start.elapsed().as_secs_f64() * 1000.0;
+        #[cfg(feature = "ui-smoke")]
+        if let Some(mut smoke) = self.smoke.take() {
+            if let Err(error) = smoke.tick(self, &ctx) {
+                smoke.fail(&ctx, &format!("{error:#}"));
+            }
+            self.smoke = Some(smoke);
+        }
+    }
+}
+
+#[cfg(feature = "ui-smoke")]
+#[path = "ui_smoke.rs"]
+mod smoke;
+impl Drop for App {
+    fn drop(&mut self) {
+        self.save();
+        if let Some(import) = &self.import {
+            import.cancel.store(true, Ordering::Relaxed);
+        }
+    }
+}
+fn decision_color(decision: Decision) -> egui::Color32 {
+    match decision {
+        Decision::Keep => egui::Color32::from_rgb(80, 210, 140),
+        Decision::Reject => egui::Color32::from_rgb(230, 100, 100),
+        Decision::Unreviewed => egui::Color32::from_rgb(190, 180, 130),
+    }
+}
+fn optional_path(value: &str) -> Option<PathBuf> {
+    (!value.trim().is_empty()).then(|| PathBuf::from(value.trim()))
+}
+fn folder_field(ui: &mut egui::Ui, label: &str, value: &mut String) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.text_edit_singleline(value);
+        if ui.button("Choose").clicked()
+            && let Some(path) = rfd::FileDialog::new().pick_folder()
+        {
+            *value = path.display().to_string();
+        }
+    });
+}

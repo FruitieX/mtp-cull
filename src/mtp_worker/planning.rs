@@ -3,7 +3,9 @@ use chrono::NaiveDate;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub enum MtpMediaKind {
     Jpeg,
     Heif,
@@ -123,6 +125,9 @@ mod tests {
             kind,
             size: 1,
             preview_path: None,
+            source_path: name.to_owned(),
+            modified: None,
+            cache_key: id.to_owned(),
         }
     }
 

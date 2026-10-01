@@ -1,42 +1,108 @@
 # mtp-cull
 
-This program aims to automate as much as possible of a fast, safe photo backup and culling routine.
+Review camera JPEGs on the PC, choose the keepers, then copy their JPEG and RAW
+originals to your NAS. Source files remain intact. The existing Windows CLI
+copy command keeps its original workflow.
 
-The command-line MTP backend currently works on Windows. The application and media-source boundary compile on Windows, Linux, and macOS so platform MTP backends can be added without coupling the culling UI to one protocol implementation.
+## Run
 
-The direct culling UI supports Windows and Linux MTP-mode devices. Linux setup, permissions, and limits are documented in [`docs/linux.md`](docs/linux.md).
+The SIMD release build is recommended for camera JPEGs. On Windows, install
+Rust (the repository pins its toolchain), Visual Studio C++ build tools, CMake,
+and NASM, then run:
 
-- [x] List all files under some given path on an MTP device
-- [x] Copy the files to a location such as `X:/Pictures/Out-of-camera/2023/2023-12-28 Album name/DSCF1234.JPG` where:
+```powershell
+./scripts/build-windows.ps1
+./target/release/mtp-cull.exe ui
+```
 
-  - `X:/Pictures` is a configurable base path
-  - `Out-of-camera` is used for JPEG files, `Undeveloped` for RAW files or `Video` for video files
-  - `2023` is the current year (defaults to timestamp when the program is run, but can be overridden)
-  - `2023-12-28` is the current date (defaults to timestamp when the program is run, but can be overridden)
-  - `Album name` is a configurable album name
+A portable build using the current pure Rust `image`/`zune-jpeg` decoder needs
+no CMake/NASM:
 
-- [ ] Select which photos to keep (so that both JPEG and RAW files are deleted if the JPEG is deleted)
-- [ ] Optionally delete the files from the MTP device after copying
-- [ ] Upload the resulting album to Google Photos
+```console
+cargo run --release -- ui
+cargo run --release -- ui --source "C:/Photos/session" --raw-source "C:/Photos/RAW"
+```
 
-## Local culling
+Linux direct MTP setup is covered in [docs/linux.md](docs/linux.md). With CMake
+and NASM available, use `cargo run --release --features turbo -- ui`.
+Direct MTP supports Windows and Linux; local-folder review also targets macOS.
+The older MTP CLI commands support Windows.
 
-The `ui` command opens a local culling session. Select an album folder, then optionally choose a separate RAW folder. Files are paired by exact filename stem, so `DSCF0001.JPG` and `DSCF0001.RAF` receive one decision and are recycled together.
+## Review workflow
 
-- Decisions are stored in the platform's per-user application-data SQLite database by BLAKE3 content fingerprint, so they survive album moves and renames.
-- JPEG companions are used for fast preview. RAF, DNG, HEIF, and videos remain included in pairing and decisions; their native preview backends are not implemented yet.
-- `1` rejects, `2` keeps, and `0` clears the decision. These and navigation, fit/100%, and A/B shortcuts are configurable in the UI.
-- Sharpness is a background Tenengrad-style score for JPEG companions. It is only a sortable hint, never an automatic decision.
-- Rejections are applied only from an explicit review screen. Every affected file is re-fingerprinted before it is sent to the platform recycle bin/trash.
+1. Open **Camera**, choose a device and folder, then start review. JPEG originals
+   stage in the background, prioritizing the current image and its neighbors.
+   Alternatively, open a local JPEG folder and optionally a separate RAW folder.
+2. Mark images **Keep**, **Reject**, or **Unreviewed**. JPEG/RAW linking defaults
+   to on: choosing a JPEG also chooses its matching RAF. Pairing uses exact stems
+   within the same relative source folder. Ambiguous pairs are flagged and excluded
+   from import; missing companions are reported in the import summary.
+3. Pin A and browse B. Use side-by-side, vertical wipe, or hold-to-blink comparison.
+   Both images share zoom and pan. 100% maps a source pixel to a physical screen
+   pixel, including Windows scaling. Alt-drag B for manual alignment.
+4. Enable **Focus** for native-resolution green peaking. Draw or create a shared
+   comparison region to see both region scores. Adjust threshold and opacity.
+   These are inspection aids; noise, texture and JPEG processing affect scores.
+5. Open **Import selected**, choose JPEG/RAW/video destinations, date and album,
+   and copy. Videos default to selected and included. Unreviewed JPEGs are excluded.
+   Destination layout is `root/Out-of-camera|Undeveloped|Video/year/date album/name`.
 
-On Windows, `ui` also supports direct MTP culling: choose a device and source folder, cull temporary cached JPEG companions, then import only explicit Keep pairs. Device files are never deleted; rejected and unrated files remain on the device. The worker design and verification constraints are documented in [`docs/direct-mtp-culling.md`](docs/direct-mtp-culling.md).
+JPEG/RAW/Video and decision filters change visibility independently of selection.
+Disabling linking restores independent RAW decisions. RAW and video entries use
+JPEG companions where available; native RAF decoding and video playback
+are outside this version.
 
-## Development
+Review decisions, destinations, shortcuts, cache settings and comparison position
+persist locally. Reopen the same source to resume. Changed files require review
+again. Camera assets without trustworthy timestamps deliberately require fresh
+decisions on reconnect. Old fingerprint-based decisions from the retired UI stay
+in the database but are not automatically migrated to metadata-based sessions.
 
-The repository pins its tested Rust toolchain. Run the standard checks with:
+## Main shortcuts
+
+All bindings are configurable in Settings. F1 shows the full list; Ctrl+P opens
+the command palette. Tab/Enter/Space also operate focused UI controls.
+
+| Action | Default |
+| --- | --- |
+| Previous / next / next unreviewed | Left / Right / N |
+| Reject / keep / clear / toggle keep | 1 / 2 / 0 / Space |
+| Undo / redo | Ctrl+Z / Ctrl+Shift+Z |
+| Pin A / compare mode / swap / choose pane | P / C / S / Tab |
+| Hold A/B blink / fit-100% | B / Z |
+| Move / center wipe divider | [ / ] / Backslash |
+| Shared pan | Ctrl+arrows |
+| Align B / reset alignment | Ctrl+Alt+arrows / Alt+R |
+| Focus / threshold / opacity | H / Minus-Equals / Shift+Minus-Equals |
+| Draw region / centered region / clear | R / Shift+R / Ctrl+Shift+R |
+| Move region / resize | Shift+arrows / Ctrl+Minus-Equals |
+| JPEG / RAW / video / all media | J / F / V / A |
+| Unreviewed / kept / rejected / all decisions | U / K / X / Shift+A |
+| Keep / reject visible images | Ctrl+A / Ctrl+Backspace |
+| Burst grouping / previous-next burst | Ctrl+B / Ctrl+PageUp-PageDown |
+| Open folder / camera / import | Ctrl+O / Ctrl+M / Ctrl+I |
+| Pause staging / retry / cancel | Ctrl+Space / F5 / Escape |
+
+Global shortcuts yield to text input and dialogs. Escape closes an idle dialog;
+outside a dialog it cancels an operation or pauses staging.
+
+## Performance and development
+
+The default CPU cache is 8 GiB (thumbnail, fit and native tiers); canvas GPU cache
+is 512 MiB and staged originals have a 32 GiB disk quota. Active images stay pinned.
+Decode queues are bounded and replaced on navigation. Background work does not
+read every RAW file or hash the whole camera before review can begin.
+
+See [measured performance and repeatable checks](docs/performance.md),
+[worker/import behavior](docs/direct-mtp-culling.md), and the
+[implementation checklist](TODO.md). Camera and NAS performance still require
+hardware validation; cold decoding is slower than cached navigation.
 
 ```console
 cargo fmt --all -- --check
-cargo test --all-targets
-cargo clippy --all-targets -- -D warnings
+cargo test --locked --all-targets
+cargo clippy --locked --all-targets -- -D warnings
 ```
+
+`scripts/build-windows.ps1 -Test` checks and builds the SIMD version. The former
+`src/ui.rs` is retained as historical source; `src/app.rs` is the active UI.

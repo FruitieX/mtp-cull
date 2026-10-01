@@ -29,7 +29,17 @@ pub enum Commands {
     Copy(CopyArgs),
 
     /// Opens a GUI
-    Ui,
+    Ui(UiArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct UiArgs {
+    /// Open a local JPEG folder immediately, without the folder picker.
+    #[arg(long)]
+    pub source: Option<String>,
+    /// Optional separate folder containing corresponding RAW files.
+    #[arg(long, requires = "source")]
+    pub raw_source: Option<String>,
 }
 
 #[derive(Args, Debug)]

@@ -1,62 +1,28 @@
 use super::{
-    MtpDevice, MtpEvent, MtpRequest, RemoteAsset, RemoteSession, RemoteShot, SourceFolder,
+    MtpDevice, MtpEvent, RemoteAsset, RemoteSession, RemoteShot, SourceFolder,
     planning::{classify_media_name, plan_import},
 };
-use crate::safe_copy::{CopyOutcome, copy_reader_no_clobber};
-use color_eyre::eyre::{Result, WrapErr, eyre};
-use directories::ProjectDirs;
-use log::warn;
+use crate::safe_copy::{CopyOutcome, copy_reader_verified};
+use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread::{self, JoinHandle};
-use winmtp::PortableDevices::WPD_OBJECT_SIZE;
+use std::sync::atomic::{AtomicBool, Ordering};
+use winmtp::PortableDevices::{WPD_OBJECT_DATE_CREATED, WPD_OBJECT_DATE_MODIFIED, WPD_OBJECT_SIZE};
 use winmtp::Provider;
 use winmtp::device::{BasicDevice, Device};
 use winmtp::object::{Object, ObjectType};
 
-/// Handle for the dedicated Windows Portable Devices worker thread.
-///
-/// Requests and events deliberately contain only owned Rust data. All COM objects stay in
-/// `WorkerState`, which is created and destroyed on the worker thread.
-pub struct MtpWorker {
-    requests: Sender<MtpRequest>,
-    events: Receiver<MtpEvent>,
-    thread: Option<JoinHandle<()>>,
-}
-
+/// Device handles remain exclusively owned by the runtime's device thread.
+pub struct MtpWorker(super::runtime::Worker);
 impl MtpWorker {
     pub fn spawn() -> Result<Self> {
-        let (request_sender, request_receiver) = mpsc::channel();
-        let (event_sender, event_receiver) = mpsc::channel();
-        let thread = thread::Builder::new()
-            .name("windows-mtp-worker".to_owned())
-            .spawn(move || WorkerState::default().run(request_receiver, event_sender))
-            .wrap_err("failed to start the Windows MTP worker thread")?;
-        Ok(Self {
-            requests: request_sender,
-            events: event_receiver,
-            thread: Some(thread),
-        })
+        Ok(Self(super::runtime::Worker::spawn(WorkerState::default)?))
     }
-
-    pub fn send(&self, request: MtpRequest) -> Result<()> {
-        self.requests
-            .send(request)
-            .map_err(|_| eyre!("the Windows MTP worker has stopped"))
+    pub fn send(&self, request: super::MtpRequest) -> Result<()> {
+        self.0.send(request)
     }
-
     pub fn try_recv(&self) -> Option<MtpEvent> {
-        self.events.try_recv().ok()
-    }
-}
-
-impl Drop for MtpWorker {
-    fn drop(&mut self) {
-        let _ = self.requests.send(MtpRequest::Shutdown);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+        self.0.try_recv()
     }
 }
 
@@ -74,52 +40,6 @@ struct PrivateSession {
 }
 
 impl WorkerState {
-    fn run(&mut self, requests: Receiver<MtpRequest>, events: Sender<MtpEvent>) {
-        while let Ok(request) = requests.recv() {
-            if matches!(request, MtpRequest::Shutdown) {
-                return;
-            }
-            let operation = request.operation();
-            let result = self.handle(request);
-            let event = match result {
-                Ok(event) => event,
-                Err(error) => MtpEvent::Error {
-                    operation,
-                    message: format!("{error:#}"),
-                },
-            };
-            if events.send(event).is_err() {
-                return;
-            }
-        }
-    }
-
-    fn handle(&mut self, request: MtpRequest) -> Result<MtpEvent> {
-        match request {
-            MtpRequest::ListDevices => Ok(MtpEvent::Devices(self.list_devices()?)),
-            MtpRequest::ListSourceFolders { device_id } => {
-                let folders = self.list_source_folders(&device_id)?;
-                Ok(MtpEvent::SourceFolders { device_id, folders })
-            }
-            MtpRequest::StartSession {
-                device_id,
-                source_folder_id,
-            } => {
-                let session = self.scan_session(device_id, source_folder_id)?;
-                let public = session.public.clone();
-                if let Some(previous) = self.session.replace(session) {
-                    remove_preview_cache(&previous);
-                }
-                Ok(MtpEvent::SessionScanned(public))
-            }
-            MtpRequest::ImportKept {
-                shot_ids,
-                destinations,
-            } => self.import_kept(shot_ids, destinations),
-            MtpRequest::Shutdown => unreachable!("shutdown is handled before dispatch"),
-        }
-    }
-
     fn provider(&mut self) -> Result<&Provider> {
         if self.provider.is_none() {
             self.provider =
@@ -189,9 +109,10 @@ impl WorkerState {
             .wrap_err("failed to access MTP device root")?;
         let source = find_container(root, &source_folder_id)?
             .ok_or_else(|| eyre!("MTP source folder {source_folder_id:?} no longer exists"))?;
-        let cache_directory = create_preview_cache_directory()?;
+        let cache_directory = super::staging::directory(&device_id, &source_folder_id)?;
+        let nonce = super::staging::nonce();
         let mut grouped = BTreeMap::<String, Vec<(RemoteAsset, Object)>>::new();
-        collect_media(source, &device_id, &cache_directory, &mut grouped)?;
+        collect_media(source, "", &mut grouped)?;
 
         let mut objects = HashMap::new();
         let mut shots = Vec::with_capacity(grouped.len());
@@ -204,86 +125,222 @@ impl WorkerState {
             });
             let id = shot_id(&device_id, &source_folder_id, &stem);
             let mut public_assets = Vec::with_capacity(assets.len());
-            for (asset, object) in assets {
+            for (mut asset, object) in assets {
+                asset.cache_key =
+                    super::staging::asset_key(&device_id, &source_folder_id, &asset, &nonce);
                 objects.insert(asset.object_id.clone(), object);
                 public_assets.push(asset);
             }
             shots.push(RemoteShot {
                 id,
-                stem,
+                stem: stem.rsplit('\0').next().unwrap_or(&stem).to_owned(),
                 assets: public_assets,
             });
         }
+        let mut public = RemoteSession {
+            device_id,
+            source_folder_id,
+            shots,
+        };
+        super::staging::restore(&mut public, &cache_directory)?;
         Ok(PrivateSession {
             _device: device,
-            public: RemoteSession {
-                device_id,
-                source_folder_id,
-                shots,
-            },
+            public,
             objects,
             cache_directory,
         })
     }
 
-    fn import_kept(
+    fn import_assets(
         &mut self,
-        shot_ids: Vec<String>,
+        object_ids: Vec<String>,
         destinations: super::planning::ImportPaths,
+        progress: &mut dyn FnMut(String, u64, u64),
+        cancel: &AtomicBool,
     ) -> Result<MtpEvent> {
         let session = self
             .session
             .as_mut()
             .ok_or_else(|| eyre!("start an MTP session before importing"))?;
-        let mut wanted = shot_ids.into_iter().collect::<HashSet<_>>();
+        let mut wanted = object_ids.into_iter().collect::<HashSet<_>>();
         let selected = session
             .public
             .shots
             .iter()
-            .filter(|shot| wanted.remove(&shot.id))
             .cloned()
+            .filter_map(|mut shot| {
+                shot.assets.retain(|asset| wanted.remove(&asset.object_id));
+                (!shot.assets.is_empty()).then_some(shot)
+            })
             .collect::<Vec<_>>();
-        if let Some(unknown_id) = wanted.into_iter().next() {
-            return Err(eyre!(
-                "remote shot {unknown_id:?} is not in the current session"
-            ));
+        if let Some(id) = wanted.into_iter().next() {
+            bail!("remote asset {id:?} is not in the current session");
         }
         let plan = plan_import(selected, &destinations).map_err(|error| eyre!(error))?;
+        let total = plan.iter().map(|(a, _)| a.size).sum();
+        let mut completed = 0;
         let mut copied = 0;
         let mut skipped_existing = 0;
         for (asset, destination) in plan {
-            let object = session
-                .objects
-                .get(&asset.object_id)
-                .ok_or_else(|| eyre!("MTP object {:?} is no longer retained", asset.object_id))?;
-            let mut input = object
-                .open_read_stream()
-                .wrap_err_with(|| format!("failed to read {}", asset.name))?;
-            match copy_reader_no_clobber(&mut input, asset.size, &destination, &asset.name)? {
+            let mut tick = |done| {
+                if cancel.load(Ordering::Relaxed) {
+                    bail!("Import cancelled; completed files and camera previews are retained");
+                }
+                progress(asset.name.clone(), completed + done, total);
+                Ok(())
+            };
+            let outcome = if let Some(path) = &asset.preview_path {
+                let mut input = std::fs::File::open(path)?;
+                let expected = super::staging::verified(path, &asset)
+                    .ok_or_else(|| eyre!("cached JPEG verification failed for {}", asset.name))?;
+                copy_reader_verified(
+                    &mut input,
+                    asset.size,
+                    &destination,
+                    &asset.name,
+                    Some(&expected),
+                    &mut tick,
+                )?
+                .0
+            } else {
+                let object = session.objects.get(&asset.object_id).ok_or_else(|| {
+                    eyre!("MTP object {:?} is no longer retained", asset.object_id)
+                })?;
+                let mut input = object
+                    .open_read_stream()
+                    .wrap_err_with(|| format!("failed to read {}", asset.name))?;
+                copy_reader_verified(
+                    &mut input,
+                    asset.size,
+                    &destination,
+                    &asset.name,
+                    None,
+                    &mut tick,
+                )?
+                .0
+            };
+            completed += asset.size;
+            match outcome {
                 CopyOutcome::Copied => copied += 1,
                 CopyOutcome::SkippedExisting => skipped_existing += 1,
             }
         }
-
-        // A failed or partial import deliberately leaves previews available for retry.
-        remove_preview_cache(session);
-        self.session = None;
         Ok(MtpEvent::ImportFinished {
             copied,
             skipped_existing,
         })
     }
+
+    fn cache_preview(
+        &mut self,
+        shot_id: String,
+        progress: &mut dyn FnMut(String, u64, u64),
+        cancel: &AtomicBool,
+    ) -> Result<MtpEvent> {
+        match self.cache_preview_inner(&shot_id, progress, cancel) {
+            Ok(preview_path) => Ok(MtpEvent::PreviewCached {
+                shot_id,
+                preview_path,
+            }),
+            Err(error) => Ok(MtpEvent::PreviewFailed {
+                shot_id,
+                message: format!("{error:#}"),
+            }),
+        }
+    }
+
+    fn cache_preview_inner(
+        &mut self,
+        shot_id: &str,
+        progress: &mut dyn FnMut(String, u64, u64),
+        cancel: &AtomicBool,
+    ) -> Result<Option<PathBuf>> {
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| eyre!("start an MTP session before caching previews"))?;
+        let asset = session
+            .public
+            .shots
+            .iter()
+            .find(|shot| shot.id == shot_id)
+            .ok_or_else(|| eyre!("MTP shot {:?} is no longer retained", shot_id))?
+            .assets
+            .iter()
+            .find(|asset| asset.kind.is_jpeg())
+            .cloned();
+        let Some(asset) = asset else {
+            return Ok(None);
+        };
+        let path = super::staging::path(&session.cache_directory, &asset);
+        if super::staging::verified(&path, &asset).is_none() {
+            super::staging::discard_invalid(&path)?;
+            let mut input = session
+                .objects
+                .get(&asset.object_id)
+                .ok_or_else(|| eyre!("camera object disappeared"))?
+                .open_read_stream()?;
+            let (_, hash) =
+                copy_reader_verified(&mut input, asset.size, &path, &asset.name, None, |done| {
+                    if cancel.load(Ordering::Relaxed) {
+                        bail!("Staging cancelled");
+                    }
+                    progress(asset.name.clone(), done, asset.size);
+                    Ok(())
+                })?;
+            super::staging::record(&path, &asset, hash)?;
+        }
+        if let Some(shot) = session
+            .public
+            .shots
+            .iter_mut()
+            .find(|shot| shot.id == shot_id)
+            && let Some(preview) = shot
+                .assets
+                .iter_mut()
+                .find(|candidate| candidate.object_id == asset.object_id)
+        {
+            preview.preview_path = Some(path.clone());
+        }
+        Ok(Some(path))
+    }
 }
 
-impl MtpRequest {
-    fn operation(&self) -> &'static str {
-        match self {
-            Self::ListDevices => "list devices",
-            Self::ListSourceFolders { .. } => "list source folders",
-            Self::StartSession { .. } => "scan session",
-            Self::ImportKept { .. } => "import kept shots",
-            Self::Shutdown => "shutdown",
-        }
+impl super::runtime::Backend for WorkerState {
+    fn devices(&mut self) -> Result<Vec<MtpDevice>> {
+        self.list_devices()
+    }
+    fn folders(&mut self, id: &str) -> Result<Vec<SourceFolder>> {
+        self.list_source_folders(id)
+    }
+    fn start(&mut self, device: String, folder: String) -> Result<RemoteSession> {
+        let session = self.scan_session(device, folder)?;
+        let public = session.public.clone();
+        self.session = Some(session);
+        Ok(public)
+    }
+    fn session(&self) -> Option<&RemoteSession> {
+        self.session.as_ref().map(|s| &s.public)
+    }
+    fn preview(
+        &mut self,
+        id: String,
+        progress: &mut dyn FnMut(String, u64, u64),
+        cancel: &AtomicBool,
+    ) -> Result<MtpEvent> {
+        self.cache_preview(id, progress, cancel)
+    }
+    fn import(
+        &mut self,
+        ids: Vec<String>,
+        destinations: super::ImportPaths,
+        progress: &mut dyn FnMut(String, u64, u64),
+        cancel: &AtomicBool,
+    ) -> Result<MtpEvent> {
+        self.import_assets(ids, destinations, progress, cancel)
+    }
+    fn close(&mut self) {
+        self.session = None;
     }
 }
 
@@ -337,8 +394,7 @@ fn find_container(container: Object, target_id: &str) -> Result<Option<Object>> 
 
 fn collect_media(
     container: Object,
-    device_id: &str,
-    cache_directory: &std::path::Path,
+    parent_path: &str,
     grouped: &mut BTreeMap<String, Vec<(RemoteAsset, Object)>>,
 ) -> Result<()> {
     for child in container
@@ -346,7 +402,8 @@ fn collect_media(
         .wrap_err("failed to enumerate MTP media")?
     {
         if is_container(&child) {
-            collect_media(child, device_id, cache_directory, grouped)?;
+            let child_path = join_remote_path(parent_path, &child.name().to_string_lossy());
+            collect_media(child, &child_path, grouped)?;
             continue;
         }
         if !child.object_type().is_file_like() {
@@ -357,62 +414,42 @@ fn collect_media(
             continue;
         };
         let object_id = child.id().to_string_lossy();
-        let size = child
-            .properties(&[WPD_OBJECT_SIZE])
-            .wrap_err_with(|| format!("failed to read metadata for {name}"))?
+        let metadata = child
+            .properties(&[
+                WPD_OBJECT_SIZE,
+                WPD_OBJECT_DATE_MODIFIED,
+                WPD_OBJECT_DATE_CREATED,
+            ])
+            .wrap_err_with(|| format!("failed to read metadata for {name}"))?;
+        let modified = metadata
+            .get_date(&WPD_OBJECT_DATE_MODIFIED)
+            .or_else(|_| metadata.get_date(&WPD_OBJECT_DATE_CREATED))
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|t| format!("{t:?}"));
+        let source_path = join_remote_path(parent_path, &name);
+        let size = metadata
             .get_u64(&WPD_OBJECT_SIZE)
             .wrap_err_with(|| format!("failed to read file size for {name}"))?;
-        let preview_path = if kind.is_jpeg() {
-            let path = cache_path(cache_directory, device_id, &object_id);
-            let mut input = child
-                .open_read_stream()
-                .wrap_err_with(|| format!("failed to read JPEG companion {name}"))?;
-            copy_reader_no_clobber(&mut input, size, &path, &name)?;
-            Some(path)
-        } else {
-            None
-        };
-        grouped.entry(stem).or_default().push((
-            RemoteAsset {
-                object_id,
-                name,
-                kind,
-                size,
-                preview_path,
-            },
-            child,
-        ));
+        let preview_path = None;
+        grouped
+            .entry(format!("{parent_path}\0{stem}"))
+            .or_default()
+            .push((
+                RemoteAsset {
+                    object_id,
+                    name,
+                    kind,
+                    size,
+                    preview_path,
+                    source_path,
+                    modified,
+                    cache_key: String::new(),
+                },
+                child,
+            ));
     }
     Ok(())
-}
-
-fn create_preview_cache_directory() -> Result<PathBuf> {
-    let directories = ProjectDirs::from("com", "fruit", "mtp-cull")
-        .ok_or_else(|| eyre!("could not determine the local application data directory"))?;
-    let root = directories.data_local_dir().join("mtp-preview-cache");
-    std::fs::create_dir_all(&root)
-        .wrap_err_with(|| format!("failed to create {}", root.display()))?;
-    Ok(tempfile::Builder::new()
-        .prefix("session-")
-        .tempdir_in(root)
-        .wrap_err("failed to create an MTP preview session cache")?
-        .keep())
-}
-
-fn remove_preview_cache(session: &PrivateSession) {
-    if let Err(error) = std::fs::remove_dir_all(&session.cache_directory)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        warn!(
-            "failed to remove MTP preview cache {}: {error}",
-            session.cache_directory.display()
-        );
-    }
-}
-
-fn cache_path(directory: &std::path::Path, device_id: &str, object_id: &str) -> PathBuf {
-    let key = blake3::hash(format!("{device_id}\0{object_id}").as_bytes());
-    directory.join(format!("{key}.jpg"))
 }
 
 fn shot_id(device_id: &str, source_folder_id: &str, stem: &str) -> String {

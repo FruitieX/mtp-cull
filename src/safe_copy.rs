@@ -36,6 +36,7 @@ pub(crate) struct CopyWriter {
     copied: u64,
     target_path: PathBuf,
     source_label: String,
+    hash: blake3::Hasher,
 }
 
 impl CopyWriter {
@@ -58,6 +59,7 @@ impl CopyWriter {
             copied: 0,
             target_path: target_path.to_owned(),
             source_label: source_label.to_owned(),
+            hash: blake3::Hasher::new(),
         })
     }
 
@@ -75,8 +77,13 @@ impl CopyWriter {
             );
         }
         self.temporary.as_file_mut().write_all(bytes)?;
+        self.hash.update(bytes);
         self.copied = copied;
         Ok(())
+    }
+
+    pub(crate) fn content_hash(&self) -> blake3::Hash {
+        self.hash.finalize()
     }
 
     pub(crate) fn finish(mut self) -> Result<CopyOutcome> {
@@ -117,7 +124,38 @@ pub fn copy_reader_no_clobber(
     target_path: &Path,
     source_label: &str,
 ) -> Result<CopyOutcome> {
+    copy_reader_with_progress(input, expected_size, target_path, source_label, |_| Ok(()))
+}
+
+/// Progress runs between bounded chunks and may abort before publication.
+pub fn copy_reader_with_progress(
+    input: &mut impl Read,
+    expected_size: u64,
+    target_path: &Path,
+    source_label: &str,
+    mut progress: impl FnMut(u64) -> Result<()>,
+) -> Result<CopyOutcome> {
+    copy_reader_verified(
+        input,
+        expected_size,
+        target_path,
+        source_label,
+        None,
+        &mut progress,
+    )
+    .map(|(outcome, _)| outcome)
+}
+
+pub(crate) fn copy_reader_verified(
+    input: &mut impl Read,
+    expected_size: u64,
+    target_path: &Path,
+    source_label: &str,
+    expected_hash: Option<&str>,
+    mut progress: impl FnMut(u64) -> Result<()>,
+) -> Result<(CopyOutcome, String)> {
     let mut writer = CopyWriter::new(expected_size, target_path, source_label)?;
+    progress(0)?;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
         let count = input.read(&mut buffer)?;
@@ -125,6 +163,74 @@ pub fn copy_reader_no_clobber(
             break;
         }
         writer.write(&buffer[..count])?;
+        progress(writer.copied)?;
     }
-    writer.finish()
+    progress(writer.copied)?;
+    let hash = writer.content_hash().to_hex().to_string();
+    if expected_hash.is_some_and(|expected| expected != hash) {
+        bail!("cached content for {source_label} changed; refusing to publish it");
+    }
+    Ok((writer.finish()?, hash))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cancellation_and_bad_hash_never_publish_partial_files_and_retry_is_safe() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("photo.jpg");
+        let bytes = vec![7; 200_000];
+        assert!(
+            copy_reader_with_progress(
+                &mut bytes.as_slice(),
+                bytes.len() as u64,
+                &target,
+                "photo",
+                |done| {
+                    if done > 0 {
+                        bail!("cancelled");
+                    }
+                    Ok(())
+                }
+            )
+            .is_err()
+        );
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+        assert!(
+            copy_reader_verified(
+                &mut bytes.as_slice(),
+                bytes.len() as u64,
+                &target,
+                "photo",
+                Some("invalid"),
+                |_| Ok(())
+            )
+            .is_err()
+        );
+        assert!(!target.exists());
+        let hash = blake3::hash(&bytes).to_hex().to_string();
+        let first = copy_reader_verified(
+            &mut bytes.as_slice(),
+            bytes.len() as u64,
+            &target,
+            "photo",
+            Some(&hash),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(first.0, CopyOutcome::Copied);
+        let second = copy_reader_verified(
+            &mut bytes.as_slice(),
+            bytes.len() as u64,
+            &target,
+            "photo",
+            Some(&hash),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(second.0, CopyOutcome::SkippedExisting);
+        assert_eq!(std::fs::read(&target).unwrap(), bytes);
+    }
 }

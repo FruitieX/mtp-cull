@@ -23,7 +23,7 @@
             cargo = rust;
             rustc = rust;
           };
-          nativeBuildInputs = [ pkgs.pkg-config ];
+          nativeBuildInputs = [ pkgs.pkg-config pkgs.cmake pkgs.nasm ];
           buildInputs = [
             pkgs.libudev
             pkgs.libxkbcommon
@@ -40,6 +40,8 @@
             version = "0.1.0";
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFeatures = [ "turbo" ];
+            cargoTestFeatures = [ "turbo" ];
             inherit nativeBuildInputs buildInputs;
           };
         });
@@ -55,6 +57,8 @@
             packages = [
               rust
               pkgs.gcc
+              pkgs.cmake
+              pkgs.nasm
               pkgs.pkg-config
               pkgs.libudev
               pkgs.libxkbcommon

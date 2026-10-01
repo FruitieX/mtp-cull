@@ -8,10 +8,12 @@ Use the Nix development shell on Ubuntu, Fedora, Arch, NixOS, or another Nix-sup
 
 ```console
 nix develop
-cargo run -- ui
+cargo run --release --features turbo -- ui
 ```
 
-The flake supplies Rust, a C compiler for bundled SQLite, and the Linux windowing/USB development libraries. The MTP backend itself does not require `libmtp`.
+The flake supplies Rust, a C compiler for bundled SQLite, CMake/NASM for SIMD JPEGs,
+and the Linux windowing/USB development libraries. The default Nix package enables
+`turbo`; the MTP backend itself does not require `libmtp`.
 
 ## Device Access
 

@@ -1,6 +1,6 @@
 use crate::culling::{
-    Action, BurstSettings, Database, Decision, Session, Shot, apply_burst_groups, apply_rejects,
-    decode_jpeg_preview, load_session, sort_by_capture_time,
+    Action, BurstMembership, BurstSettings, Database, Decision, Session, apply_burst_groups,
+    apply_rejects, decode_jpeg_preview, load_session, sort_by_capture_time,
 };
 use crate::mtp_worker::{
     ImportPaths, MtpDevice, MtpEvent, MtpRequest, MtpWorker, RemoteSession, SourceFolder,
@@ -13,7 +13,8 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 const FIT_PREVIEW_EDGE: u32 = 1_600;
-const PREVIEW_CACHE_CAPACITY: usize = 6;
+const THUMBNAIL_EDGE: u32 = 96;
+const PREVIEW_CACHE_CAPACITY: usize = 18;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct PreviewKey {
@@ -23,6 +24,7 @@ struct PreviewKey {
 }
 
 struct PreviewResult {
+    generation: u64,
     key: PreviewKey,
     image: Result<egui::ColorImage, String>,
 }
@@ -36,12 +38,58 @@ struct DirectShot {
     id: String,
     stem: String,
     preview_path: Option<PathBuf>,
+    preview_known: bool,
+    preview_error: Option<String>,
     asset_summary: String,
     decision: Decision,
 }
 
 struct DirectSession {
     shots: Vec<DirectShot>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DecisionFilter {
+    All,
+    Unrated,
+    Keep,
+    Reject,
+}
+
+impl DecisionFilter {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Unrated => "Unrated",
+            Self::Keep => "Keep",
+            Self::Reject => "Reject",
+        }
+    }
+
+    fn matches(self, decision: Decision) -> bool {
+        match self {
+            Self::All => true,
+            Self::Unrated => decision == Decision::Unrated,
+            Self::Keep => decision == Decision::Keep,
+            Self::Reject => decision == Decision::Reject,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ShotDisplay {
+    identity: String,
+    stem: String,
+    decision: Decision,
+    preview_path: Option<PathBuf>,
+    preview_known: bool,
+    preview_error: Option<String>,
+    orientation: Option<u16>,
+    asset_summary: String,
+    has_conflict: bool,
+    burst: Option<BurstMembership>,
+    sharpness: Option<f64>,
+    capture_time: Option<String>,
 }
 
 struct ImportForm {
@@ -73,6 +121,7 @@ pub fn init() -> Result<()> {
         env!("CARGO_PKG_NAME"),
         options,
         Box::new(|cc| {
+            cc.egui_ctx.set_visuals(egui::Visuals::dark());
             egui_extras::install_image_loaders(&cc.egui_ctx);
             Ok(Box::new(MyApp::new()?))
         }),
@@ -94,12 +143,17 @@ struct MyApp {
     loading: Option<Receiver<Result<Session>>>,
     preview_sender: Sender<PreviewResult>,
     preview_receiver: Receiver<PreviewResult>,
+    preview_generation: u64,
     preview_cache: HashMap<PreviewKey, CachedPreview>,
     preview_pending: HashSet<PreviewKey>,
+    mtp_preview_pending: HashSet<String>,
     preview_tick: u64,
     selected: usize,
-    zoom: Option<f32>,
+    zoom_levels: HashMap<String, f32>,
     compare_next: bool,
+    filter: DecisionFilter,
+    decision_counts: [usize; 3],
+    filtered_indices: Vec<usize>,
     sort_by_sharpness: bool,
     show_shortcuts: bool,
     show_burst_settings: bool,
@@ -132,12 +186,17 @@ impl MyApp {
             loading: None,
             preview_sender,
             preview_receiver,
+            preview_generation: 0,
             preview_cache: HashMap::new(),
             preview_pending: HashSet::new(),
+            mtp_preview_pending: HashSet::new(),
             preview_tick: 0,
             selected: 0,
-            zoom: None,
+            zoom_levels: HashMap::new(),
             compare_next: false,
+            filter: DecisionFilter::All,
+            decision_counts: [0; 3],
+            filtered_indices: Vec::new(),
             sort_by_sharpness: false,
             show_shortcuts: false,
             show_burst_settings: false,
@@ -160,11 +219,15 @@ impl MyApp {
         self.loading = Some(receiver);
         self.session = None;
         self.direct_session = None;
+        self.preview_generation = self.preview_generation.wrapping_add(1);
         self.selected = 0;
-        self.zoom = None;
+        self.zoom_levels.clear();
         self.compare_next = false;
+        self.filter = DecisionFilter::All;
+        self.refresh_navigation_cache();
         self.preview_cache.clear();
         self.preview_pending.clear();
+        self.mtp_preview_pending.clear();
         self.error = None;
         self.notice = None;
     }
@@ -179,6 +242,7 @@ impl MyApp {
                 apply_burst_groups(&mut session.shots, self.burst_settings);
                 self.notice = Some(format!("Loaded {} shots", session.shots.len()));
                 self.session = Some(session);
+                self.refresh_navigation_cache();
                 self.loading = None;
             }
             Ok(Err(error)) => {
@@ -230,6 +294,30 @@ impl MyApp {
                     }
                 }
                 MtpEvent::SessionScanned(session) => self.start_direct_session(session),
+                MtpEvent::PreviewCached {
+                    shot_id,
+                    preview_path,
+                } => {
+                    if let Some(session) = &mut self.direct_session
+                        && let Some(shot) = session.shots.iter_mut().find(|shot| shot.id == shot_id)
+                    {
+                        shot.preview_path = preview_path;
+                        shot.preview_known = true;
+                        shot.preview_error = None;
+                    }
+                    self.mtp_preview_pending.remove(&shot_id);
+                    self.error = None;
+                }
+                MtpEvent::PreviewFailed { shot_id, message } => {
+                    if let Some(session) = &mut self.direct_session
+                        && let Some(shot) = session.shots.iter_mut().find(|shot| shot.id == shot_id)
+                    {
+                        shot.preview_known = true;
+                        shot.preview_error = Some(message.clone());
+                    }
+                    self.mtp_preview_pending.remove(&shot_id);
+                    self.error = Some(format!("Could not fetch MTP preview: {message}"));
+                }
                 MtpEvent::ImportFinished {
                     copied,
                     skipped_existing,
@@ -238,8 +326,11 @@ impl MyApp {
                         "Imported {copied} files; {skipped_existing} identical existing files skipped"
                     ));
                     self.direct_session = None;
+                    self.preview_generation = self.preview_generation.wrapping_add(1);
+                    self.refresh_navigation_cache();
                     self.preview_cache.clear();
                     self.preview_pending.clear();
+                    self.mtp_preview_pending.clear();
                 }
                 MtpEvent::Error { operation, message } => {
                     self.error = Some(format!("MTP {operation} failed: {message}"));
@@ -259,6 +350,8 @@ impl MyApp {
                     .assets
                     .iter()
                     .find_map(|asset| asset.preview_path.clone()),
+                preview_known: false,
+                preview_error: None,
                 asset_summary: shot
                     .assets
                     .iter()
@@ -269,21 +362,28 @@ impl MyApp {
             })
             .collect::<Vec<_>>();
         self.notice = Some(format!(
-            "Cached JPEG previews for {} MTP shots",
+            "MTP session ready: {} shots; previews load as you browse",
             shots.len()
         ));
         self.session = None;
         self.direct_session = Some(DirectSession { shots });
+        self.preview_generation = self.preview_generation.wrapping_add(1);
         self.selected = 0;
-        self.zoom = None;
+        self.zoom_levels.clear();
         self.compare_next = false;
+        self.filter = DecisionFilter::All;
+        self.refresh_navigation_cache();
         self.preview_cache.clear();
         self.preview_pending.clear();
+        self.mtp_preview_pending.clear();
         self.show_mtp_picker = false;
     }
 
     fn poll_previews(&mut self, ctx: &egui::Context) {
         while let Ok(result) = self.preview_receiver.try_recv() {
+            if result.generation != self.preview_generation {
+                continue;
+            }
             self.preview_pending.remove(&result.key);
             match result.image {
                 Ok(image) => {
@@ -326,10 +426,15 @@ impl MyApp {
         }
         let sender = self.preview_sender.clone();
         let context = ctx.clone();
+        let generation = self.preview_generation;
         std::thread::spawn(move || {
             let image = decode_jpeg_preview(&key.path, key.orientation, key.max_edge)
                 .map_err(|error| format!("{error:#}"));
-            let _ = sender.send(PreviewResult { key, image });
+            let _ = sender.send(PreviewResult {
+                generation,
+                key,
+                image,
+            });
             context.request_repaint();
         });
     }
@@ -342,48 +447,22 @@ impl MyApp {
     }
 
     fn preload_nearby_previews(&mut self, ctx: &egui::Context) {
-        if let Some(session) = &self.direct_session {
-            let keys = [-1_isize, 0, 1]
-                .into_iter()
-                .filter_map(|offset| {
-                    let index = self.selected.saturating_add_signed(offset);
-                    let shot = session.shots.get(index)?;
-                    let path = shot.preview_path.clone()?;
-                    Some(PreviewKey {
-                        path,
-                        orientation: None,
-                        max_edge: if index == self.selected && self.zoom.is_some() {
-                            None
-                        } else {
-                            Some(FIT_PREVIEW_EDGE)
-                        },
-                    })
-                })
-                .collect::<Vec<_>>();
-            for key in keys {
-                self.request_preview(ctx, key);
-            }
-            return;
-        }
-        let Some(session) = &self.session else {
-            return;
-        };
+        self.request_mtp_previews();
         let mut keys = Vec::new();
-        for offset in [-1_isize, 0, 1] {
+        for offset in [-2_isize, -1, 0, 1, 2] {
             let index = self.selected.saturating_add_signed(offset);
-            if index >= session.shots.len() {
-                continue;
-            }
-            if let Some(asset) = session.shots[index].jpeg() {
-                keys.push(PreviewKey {
-                    path: asset.path.clone(),
-                    orientation: asset.orientation,
-                    max_edge: if index == self.selected && self.zoom.is_some() {
+            if index < self.shot_count()
+                && let Some(display) = self.display_shot(index)
+                && let Some(key) = self.preview_key(
+                    &display,
+                    if self.zoom_for(index).is_some() {
                         None
                     } else {
                         Some(FIT_PREVIEW_EDGE)
                     },
-                });
+                )
+            {
+                keys.push(key);
             }
         }
         for key in keys {
@@ -391,8 +470,54 @@ impl MyApp {
         }
     }
 
-    fn selected_shot(&self) -> Option<&Shot> {
-        self.session.as_ref()?.shots.get(self.selected)
+    fn request_mtp_previews(&mut self) {
+        let Some(session) = &self.direct_session else {
+            return;
+        };
+        let candidates = [0_isize, 1, -1, 2, -2]
+            .into_iter()
+            .filter_map(|offset| {
+                let index = self.selected.saturating_add_signed(offset);
+                session
+                    .shots
+                    .get(index)
+                    .map(|shot| (shot.id.clone(), shot.preview_known))
+            })
+            .collect::<Vec<_>>();
+        let mut shot_ids = Vec::new();
+        for (shot_id, preview_known) in candidates {
+            if !preview_known && self.mtp_preview_pending.insert(shot_id.clone()) {
+                shot_ids.push(shot_id);
+            }
+        }
+        if shot_ids.is_empty() {
+            return;
+        }
+        if let Some(worker) = &self.mtp_worker {
+            for shot_id in shot_ids {
+                if let Err(error) = worker.send(MtpRequest::CachePreview {
+                    shot_id: shot_id.clone(),
+                }) {
+                    self.mtp_preview_pending.remove(&shot_id);
+                    self.error = Some(format!("Could not request MTP preview: {error:#}"));
+                    break;
+                }
+            }
+        }
+    }
+
+    fn retry_mtp_preview(&mut self, index: usize) {
+        let Some(session) = &mut self.direct_session else {
+            return;
+        };
+        let Some(shot) = session.shots.get_mut(index) else {
+            return;
+        };
+        let shot_id = shot.id.clone();
+        shot.preview_known = false;
+        shot.preview_error = None;
+        self.mtp_preview_pending.remove(&shot_id);
+        self.error = None;
     }
 
     fn shot_count(&self) -> usize {
@@ -410,17 +535,179 @@ impl MyApp {
         self.shot_count() > 0
     }
 
+    fn decision_at(&self, index: usize) -> Option<Decision> {
+        if let Some(session) = &self.direct_session {
+            return session.shots.get(index).map(|shot| shot.decision);
+        }
+        self.session
+            .as_ref()
+            .and_then(|session| session.shots.get(index))
+            .map(|shot| shot.decision)
+    }
+
+    fn refresh_navigation_cache(&mut self) {
+        let mut counts = [0; 3];
+        let mut filtered = Vec::new();
+        for index in 0..self.shot_count() {
+            if let Some(decision) = self.decision_at(index) {
+                match decision {
+                    Decision::Unrated => counts[0] += 1,
+                    Decision::Keep => counts[1] += 1,
+                    Decision::Reject => counts[2] += 1,
+                }
+                if self.filter.matches(decision) {
+                    filtered.push(index);
+                }
+            }
+        }
+        self.decision_counts = counts;
+        self.filtered_indices = filtered;
+    }
+
+    fn decision_counts(&self) -> [usize; 3] {
+        self.decision_counts
+    }
+
+    fn visible_indices(&self) -> &[usize] {
+        &self.filtered_indices
+    }
+
+    fn ensure_selected_visible(&mut self) {
+        if !self.visible_indices().contains(&self.selected)
+            && let Some(index) = self.visible_indices().first().copied()
+        {
+            self.selected = index;
+            self.compare_next = false;
+        }
+    }
+
+    fn set_filter(&mut self, filter: DecisionFilter) {
+        self.filter = filter;
+        self.refresh_navigation_cache();
+        self.ensure_selected_visible();
+    }
+
+    fn zoom_key(&self, index: usize) -> Option<String> {
+        self.display_shot(index).map(|display| display.identity)
+    }
+
+    fn zoom_for(&self, index: usize) -> Option<f32> {
+        self.zoom_key(index)
+            .and_then(|key| self.zoom_levels.get(&key).copied())
+    }
+
+    fn set_zoom_for(&mut self, index: usize, zoom: Option<f32>) {
+        let Some(key) = self.zoom_key(index) else {
+            return;
+        };
+        if let Some(zoom) = zoom {
+            self.zoom_levels.insert(key, zoom);
+        } else {
+            self.zoom_levels.remove(&key);
+        }
+    }
+
+    fn display_shot(&self, index: usize) -> Option<ShotDisplay> {
+        if let Some(session) = &self.direct_session {
+            let shot = session.shots.get(index)?;
+            return Some(ShotDisplay {
+                identity: format!("mtp:{}", shot.id),
+                stem: shot.stem.clone(),
+                decision: shot.decision,
+                preview_path: shot.preview_path.clone(),
+                preview_known: shot.preview_known,
+                preview_error: shot.preview_error.clone(),
+                orientation: None,
+                asset_summary: shot.asset_summary.clone(),
+                has_conflict: false,
+                burst: None,
+                sharpness: None,
+                capture_time: None,
+            });
+        }
+        let shot = self.session.as_ref()?.shots.get(index)?;
+        let jpeg = shot.jpeg();
+        let preview_path = jpeg.map(|asset| asset.path.clone());
+        let identity = preview_path
+            .clone()
+            .or_else(|| shot.assets.first().map(|asset| asset.path.clone()))
+            .map(|path| format!("local:{}", path.display()))
+            .unwrap_or_else(|| format!("local:{}", shot.stem));
+        Some(ShotDisplay {
+            identity,
+            stem: shot.stem.clone(),
+            decision: shot.decision,
+            preview_path,
+            preview_known: true,
+            preview_error: None,
+            orientation: jpeg.and_then(|asset| asset.orientation),
+            asset_summary: shot
+                .assets
+                .iter()
+                .map(|asset| asset.kind.label())
+                .collect::<Vec<_>>()
+                .join(" + "),
+            has_conflict: shot.has_conflict(),
+            burst: shot.burst,
+            sharpness: shot.sharpness(),
+            capture_time: shot
+                .capture_time()
+                .map(|time| time.format("%Y-%m-%d %H:%M:%S").to_string()),
+        })
+    }
+
+    fn preview_key(&self, display: &ShotDisplay, max_edge: Option<u32>) -> Option<PreviewKey> {
+        Some(PreviewKey {
+            path: display.preview_path.clone()?,
+            orientation: display.orientation,
+            max_edge,
+        })
+    }
+
+    fn move_to_next_unrated(&mut self) {
+        let count = self.shot_count();
+        if count == 0 {
+            return;
+        }
+        for offset in 1..=count {
+            let index = (self.selected + offset) % count;
+            if self.decision_at(index) == Some(Decision::Unrated) {
+                self.selected = index;
+                self.compare_next = false;
+                return;
+            }
+        }
+        self.notice = Some("All shots have a decision".to_owned());
+    }
+
     fn move_selection(&mut self, amount: isize) {
         let shot_count = self.shot_count();
         if shot_count == 0 {
+            return;
+        }
+        if self.filter != DecisionFilter::All {
+            if let Some(position) = self
+                .filtered_indices
+                .iter()
+                .position(|index| *index == self.selected)
+            {
+                let target = position
+                    .saturating_add_signed(amount)
+                    .min(self.filtered_indices.len().saturating_sub(1));
+                self.selected = self.filtered_indices[target];
+            } else {
+                self.ensure_selected_visible();
+            }
+            self.compare_next = self.selected + 1 >= shot_count;
             return;
         }
         self.selected = self
             .selected
             .saturating_add_signed(amount)
             .min(shot_count.saturating_sub(1));
-        self.zoom = None;
-        self.compare_next = false;
+        if self.selected + 1 >= shot_count {
+            self.compare_next = false;
+        }
     }
 
     fn set_decision(&mut self, decision: Decision) {
@@ -431,9 +718,9 @@ impl MyApp {
             shot.decision = decision;
             if self.selected + 1 < session.shots.len() {
                 self.selected += 1;
-                self.zoom = None;
-                self.compare_next = false;
             }
+            self.refresh_navigation_cache();
+            self.ensure_selected_visible();
             return;
         }
         let Some(session) = &mut self.session else {
@@ -449,9 +736,9 @@ impl MyApp {
         shot.decision = decision;
         if self.selected + 1 < session.shots.len() {
             self.selected += 1;
-            self.zoom = None;
-            self.compare_next = false;
         }
+        self.refresh_navigation_cache();
+        self.ensure_selected_visible();
     }
 
     fn shortcut_pressed(&self, ctx: &egui::Context, action: Action) -> bool {
@@ -476,6 +763,9 @@ impl MyApp {
         if self.shortcut_pressed(ctx, Action::Next) {
             self.move_selection(1);
         }
+        if self.shortcut_pressed(ctx, Action::NextUnrated) {
+            self.move_to_next_unrated();
+        }
         if self.shortcut_pressed(ctx, Action::Reject) {
             self.set_decision(Decision::Reject);
         }
@@ -486,7 +776,12 @@ impl MyApp {
             self.set_decision(Decision::Unrated);
         }
         if self.shortcut_pressed(ctx, Action::ToggleZoom) {
-            self.zoom = if self.zoom.is_some() { None } else { Some(1.0) };
+            let zoom = if self.zoom_for(self.selected).is_some() {
+                None
+            } else {
+                Some(1.0)
+            };
+            self.set_zoom_for(self.selected, zoom);
         }
         if self.shortcut_pressed(ctx, Action::ToggleCompare)
             && self.selected + 1 < self.shot_count()
@@ -500,6 +795,8 @@ impl MyApp {
             for shot in &mut session.shots {
                 shot.decision = Decision::Keep;
             }
+            self.refresh_navigation_cache();
+            self.ensure_selected_visible();
             self.notice = Some("Marked every MTP shot as Keep".to_owned());
             return;
         }
@@ -513,6 +810,8 @@ impl MyApp {
             }
             shot.decision = Decision::Keep;
         }
+        self.refresh_navigation_cache();
+        self.ensure_selected_visible();
         self.notice = Some("Marked every shot as Keep".to_owned());
     }
 
@@ -535,37 +834,152 @@ impl MyApp {
             self.notice = Some("Sorted by capture time".to_owned());
         }
         self.selected = 0;
-        self.zoom = None;
+        self.refresh_navigation_cache();
+        self.ensure_selected_visible();
         self.compare_next = false;
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let mut decision = None;
-        ui.horizontal_wrapped(|ui| {
+        let has_session = self.has_session();
+        ui.horizontal(|ui| {
+            ui.heading("MTP CULL");
             if ui.button("Open album").clicked()
                 && let Some(path) = rfd::FileDialog::new().pick_folder()
             {
                 self.begin_loading(path, None);
             }
-            if ui.button("Cull MTP device").clicked() {
+            if ui.button("Cull MTP").clicked() {
                 self.open_mtp_picker();
             }
             if ui
-                .add_enabled(
-                    self.session.is_some(),
-                    egui::Button::new("Choose RAW folder"),
-                )
+                .add_enabled(self.session.is_some(), egui::Button::new("RAW folder"))
                 .clicked()
                 && let Some(raw_directory) = rfd::FileDialog::new().pick_folder()
                 && let Some(session) = &self.session
             {
                 self.begin_loading(session.primary_directory.clone(), Some(raw_directory));
             }
+            ui.separator();
+            if let Some(session) = &self.session {
+                ui.label(format!("{}", session.primary_directory.display()));
+                if session.raw_directory.is_some() {
+                    ui.weak("+ RAW");
+                }
+            } else if self.direct_session.is_some() {
+                ui.label("MTP device session");
+            } else {
+                ui.weak("No session");
+            }
+            let counts = self.decision_counts();
+            if has_session {
+                ui.separator();
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 180, 80),
+                    format!("{} unrated", counts[0]),
+                );
+                ui.colored_label(
+                    egui::Color32::from_rgb(100, 205, 130),
+                    format!("{} keep", counts[1]),
+                );
+                ui.colored_label(
+                    egui::Color32::from_rgb(220, 105, 105),
+                    format!("{} reject", counts[2]),
+                );
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Shortcuts").clicked() {
+                    self.show_shortcuts = true;
+                }
+                if ui.button("Burst").clicked() {
+                    self.show_burst_settings = true;
+                }
+                if ui
+                    .add_enabled(
+                        has_session,
+                        egui::Button::new(if self.sort_by_sharpness {
+                            "Capture order"
+                        } else {
+                            "Sort sharpness"
+                        }),
+                    )
+                    .on_hover_text("Sort by the JPEG sharpness hint")
+                    .clicked()
+                {
+                    self.toggle_sharpness_sort();
+                }
+            });
+        });
+        ui.horizontal(|ui| {
+            let key = |action: Action| {
+                self.keybindings
+                    .get(&action)
+                    .map_or(action.default_key(), String::as_str)
+            };
             if ui
-                .add_enabled(self.has_session(), egui::Button::new("All Keep"))
+                .add_enabled(
+                    has_session,
+                    egui::Button::new(format!("Reject  [{}]", key(Action::Reject)))
+                        .fill(egui::Color32::from_rgb(105, 45, 48)),
+                )
                 .clicked()
             {
-                self.show_keep_all_confirmation = true;
+                decision = Some(Decision::Reject);
+            }
+            if ui
+                .add_enabled(
+                    has_session,
+                    egui::Button::new(format!("Keep  [{}]", key(Action::Keep)))
+                        .fill(egui::Color32::from_rgb(42, 103, 70)),
+                )
+                .clicked()
+            {
+                decision = Some(Decision::Keep);
+            }
+            if ui
+                .add_enabled(
+                    has_session,
+                    egui::Button::new(format!("Clear  [{}]", key(Action::Unrated)))
+                        .fill(egui::Color32::from_rgb(85, 85, 85)),
+                )
+                .clicked()
+            {
+                decision = Some(Decision::Unrated);
+            }
+            ui.separator();
+            if ui
+                .add_enabled(
+                    has_session,
+                    egui::Button::new(if self.zoom_for(self.selected).is_some() {
+                        "Fit"
+                    } else {
+                        "100%"
+                    }),
+                )
+                .on_hover_text("The zoom level is remembered for each shot")
+                .clicked()
+            {
+                let zoom = if self.zoom_for(self.selected).is_some() {
+                    None
+                } else {
+                    Some(1.0)
+                };
+                self.set_zoom_for(self.selected, zoom);
+            }
+            let has_compare_target = self.selected + 1 < self.shot_count();
+            if ui
+                .add_enabled(
+                    has_compare_target,
+                    egui::Button::new(if self.compare_next {
+                        "A/B on"
+                    } else {
+                        "Compare A/B"
+                    }),
+                )
+                .on_hover_text("Compare the selected shot with the next one")
+                .clicked()
+            {
+                self.compare_next = !self.compare_next;
             }
             if ui
                 .add_enabled(self.session.is_some(), egui::Button::new("Review rejects"))
@@ -576,109 +990,27 @@ impl MyApp {
             if ui
                 .add_enabled(
                     self.direct_session.is_some(),
-                    egui::Button::new("Import Keep shots"),
+                    egui::Button::new("Import Keep"),
                 )
                 .clicked()
             {
                 self.show_import_review = true;
             }
             if ui
-                .add_enabled(
-                    self.has_session(),
-                    egui::Button::new(if self.sort_by_sharpness {
-                        "Sort by capture time"
-                    } else {
-                        "Sort by sharpness"
-                    }),
-                )
+                .add_enabled(has_session, egui::Button::new("All Keep"))
                 .clicked()
             {
-                self.toggle_sharpness_sort();
+                self.show_keep_all_confirmation = true;
             }
-            if ui.button("Shortcuts").clicked() {
-                self.show_shortcuts = true;
-            }
-            if ui.button("Burst settings").clicked() {
-                self.show_burst_settings = true;
-            }
-            ui.separator();
-            if ui
-                .add_enabled(
-                    self.has_session(),
-                    egui::Button::new(format!(
-                        "Reject [{}]",
-                        self.keybindings
-                            .get(&Action::Reject)
-                            .map_or(Action::Reject.default_key(), String::as_str)
-                    )),
-                )
-                .clicked()
-            {
-                decision = Some(Decision::Reject);
-            }
-            if ui
-                .add_enabled(
-                    self.has_session(),
-                    egui::Button::new(format!(
-                        "Keep [{}]",
-                        self.keybindings
-                            .get(&Action::Keep)
-                            .map_or(Action::Keep.default_key(), String::as_str)
-                    )),
-                )
-                .clicked()
-            {
-                decision = Some(Decision::Keep);
-            }
-            if ui
-                .add_enabled(
-                    self.has_session(),
-                    egui::Button::new(format!(
-                        "Unrated [{}]",
-                        self.keybindings
-                            .get(&Action::Unrated)
-                            .map_or(Action::Unrated.default_key(), String::as_str)
-                    )),
-                )
-                .clicked()
-            {
-                decision = Some(Decision::Unrated);
-            }
-            if ui
-                .add_enabled(
-                    self.has_session(),
-                    egui::Button::new(if self.zoom.is_some() { "Fit" } else { "100%" }),
-                )
-                .clicked()
-            {
-                self.zoom = if self.zoom.is_some() { None } else { Some(1.0) };
-            }
-            let has_compare_target = self.selected + 1 < self.shot_count();
-            if ui
-                .add_enabled(
-                    has_compare_target,
-                    egui::Button::new(if self.compare_next {
-                        "A/B: next"
-                    } else {
-                        "A/B"
-                    }),
-                )
-                .clicked()
-            {
-                self.compare_next = !self.compare_next;
-            }
-            if let Some(session) = &self.session {
-                ui.separator();
-                ui.label(format!("{} shots", session.shots.len()));
-                ui.label(format!("Album: {}", session.primary_directory.display()));
-                if let Some(raw_directory) = &session.raw_directory {
-                    ui.label(format!("RAW: {}", raw_directory.display()));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if has_session {
+                    ui.label(format!(
+                        "Shot {} / {}",
+                        self.selected + 1,
+                        self.shot_count()
+                    ));
                 }
-            }
-            if let Some(session) = &self.direct_session {
-                ui.separator();
-                ui.label(format!("{} MTP shots", session.shots.len()));
-            }
+            });
         });
         if let Some(decision) = decision {
             self.set_decision(decision);
@@ -686,235 +1018,282 @@ impl MyApp {
     }
 
     fn shot_list(&mut self, ui: &mut egui::Ui) {
-        if let Some(session) = &self.direct_session {
-            egui::ScrollArea::vertical().show_rows(ui, 24.0, session.shots.len(), |ui, range| {
-                for index in range {
-                    let shot = &session.shots[index];
-                    let decision = match shot.decision {
-                        Decision::Keep => "K",
-                        Decision::Reject => "R",
-                        Decision::Unrated => "-",
-                    };
-                    if ui
-                        .selectable_label(
-                            index == self.selected,
-                            format!("[{decision}] {}", shot.stem),
-                        )
-                        .clicked()
-                    {
-                        self.selected = index;
-                        self.zoom = None;
-                        self.compare_next = false;
-                    }
-                }
-            });
-            return;
-        }
-        let Some(session) = &self.session else {
+        if !self.has_session() {
             ui.centered_and_justified(|ui| ui.label("Open an album to start culling"));
             return;
-        };
-        egui::ScrollArea::vertical().show_rows(ui, 24.0, session.shots.len(), |ui, range| {
-            for index in range {
-                let shot = &session.shots[index];
-                let decision = match shot.decision {
-                    Decision::Keep => "K",
-                    Decision::Reject => "R",
-                    Decision::Unrated => "-",
+        }
+        let counts = self.decision_counts();
+        ui.horizontal_wrapped(|ui| {
+            for (filter, count) in [
+                (DecisionFilter::All, self.shot_count()),
+                (DecisionFilter::Unrated, counts[0]),
+                (DecisionFilter::Keep, counts[1]),
+                (DecisionFilter::Reject, counts[2]),
+            ] {
+                if ui
+                    .selectable_label(
+                        self.filter == filter,
+                        format!("{}  {}", filter.label(), count),
+                    )
+                    .clicked()
+                {
+                    self.set_filter(filter);
+                }
+            }
+        });
+        ui.separator();
+        let filtered = (self.filter != DecisionFilter::All).then(|| self.filtered_indices.clone());
+        let visible_count = filtered.as_ref().map_or(self.shot_count(), Vec::len);
+        if visible_count == 0 {
+            ui.centered_and_justified(|ui| ui.label("Nothing in this view"));
+            return;
+        }
+        egui::ScrollArea::vertical().show_rows(ui, 64.0, visible_count, |ui, range| {
+            for row in range {
+                let index = filtered.as_ref().map_or(row, |indices| indices[row]);
+                let Some(display) = self.display_shot(index) else {
+                    continue;
                 };
-                let mut label = format!("[{decision}] {}", shot.stem);
-                if shot.has_conflict() {
-                    label.push_str(" !");
-                }
-                if let Some(burst) = shot.burst {
-                    label.push_str(&format!(" B{}:{}", burst.id, burst.distance_to_previous));
-                }
-                if ui.selectable_label(index == self.selected, label).clicked() {
+                let selected = index == self.selected;
+                let mut clicked = false;
+                ui.horizontal(|ui| {
+                    let (rect, thumb_response) =
+                        ui.allocate_exact_size(egui::vec2(56.0, 56.0), egui::Sense::click());
+                    if let Some(key) = self.preview_key(&display, Some(THUMBNAIL_EDGE)) {
+                        self.request_preview(ui.ctx(), key.clone());
+                        if let Some(texture) = self.cached_preview(&key) {
+                            ui.put(
+                                rect,
+                                egui::Image::from_texture(&texture).fit_to_exact_size(rect.size()),
+                            );
+                        } else {
+                            ui.painter()
+                                .rect_filled(rect, 2.0, egui::Color32::from_gray(38));
+                        }
+                    } else {
+                        ui.painter()
+                            .rect_filled(rect, 2.0, egui::Color32::from_gray(38));
+                    }
+                    clicked |= thumb_response.clicked();
+                    ui.vertical(|ui| {
+                        ui.set_min_height(56.0);
+                        let status = match display.decision {
+                            Decision::Keep => ("K", egui::Color32::from_rgb(100, 205, 130)),
+                            Decision::Reject => ("R", egui::Color32::from_rgb(220, 105, 105)),
+                            Decision::Unrated => ("·", egui::Color32::from_rgb(220, 180, 80)),
+                        };
+                        ui.horizontal(|ui| {
+                            ui.colored_label(status.1, status.0);
+                            let response = ui.selectable_label(selected, &display.stem);
+                            clicked |= response.clicked();
+                        });
+                        ui.weak(display.asset_summary);
+                        let mut detail = String::new();
+                        if display.has_conflict {
+                            detail.push_str("conflict  ");
+                        }
+                        if let Some(burst) = display.burst {
+                            detail.push_str(&format!("burst {}  ", burst.id));
+                        }
+                        if let Some(sharpness) = display.sharpness {
+                            detail.push_str(&format!("sharpness {:.0}", sharpness));
+                        }
+                        if !detail.is_empty() {
+                            ui.small(detail);
+                        }
+                    });
+                });
+                if clicked {
                     self.selected = index;
-                    self.zoom = None;
                     self.compare_next = false;
                 }
+                ui.add_space(2.0);
             }
         });
     }
 
     fn image_viewer(&mut self, ui: &mut egui::Ui) {
-        if self.direct_session.is_some() {
-            self.direct_image_viewer(ui);
+        if !self.has_session() {
+            ui.centered_and_justified(|ui| {
+                ui.vertical_centered(|ui| {
+                    ui.heading("Ready to cull");
+                    ui.label("Open an album or connect an MTP device.");
+                    ui.small("1 Reject   2 Keep   0 Clear   ←/→ Browse   Tab Next unrated");
+                });
+            });
             return;
         }
-        let displayed = if self.compare_next {
-            self.session
-                .as_ref()
-                .and_then(|session| session.shots.get(self.selected + 1))
+        if self.compare_next && self.selected + 1 < self.shot_count() {
+            ui.horizontal(|ui| {
+                ui.strong("A/B comparison");
+                ui.weak("Decision applies to A  •  Keep or reject, then continue with →");
+            });
+            ui.columns(2, |columns| {
+                columns[0].push_id(("compare", self.selected), |ui| {
+                    self.image_pane(ui, self.selected, "A");
+                });
+                columns[1].push_id(("compare", self.selected + 1), |ui| {
+                    self.image_pane(ui, self.selected + 1, "B");
+                });
+            });
         } else {
-            self.selected_shot()
-        };
-        let Some(shot) = displayed else {
-            ui.centered_and_justified(|ui| ui.label("Open an album to start culling"));
+            self.image_pane(ui, self.selected, "");
+        }
+    }
+
+    fn image_pane(&mut self, ui: &mut egui::Ui, index: usize, pane_label: &str) {
+        let Some(display) = self.display_shot(index) else {
             return;
         };
         ui.horizontal(|ui| {
-            ui.strong(&shot.stem);
-            ui.label(shot.decision.label());
-            if self.compare_next {
-                ui.colored_label(egui::Color32::LIGHT_BLUE, "A/B: next shot");
+            if !pane_label.is_empty() {
+                ui.strong(pane_label);
             }
-            if shot.has_conflict() {
-                ui.colored_label(egui::Color32::YELLOW, "Duplicate companion conflict");
+            ui.strong(&display.stem);
+            ui.colored_label(decision_color(display.decision), display.decision.label());
+            if display.has_conflict {
+                ui.colored_label(egui::Color32::YELLOW, "conflict");
             }
-            if let Some(burst) = shot.burst {
-                ui.colored_label(
-                    egui::Color32::LIGHT_BLUE,
-                    format!(
-                        "Burst {} (distance {})",
-                        burst.id, burst.distance_to_previous
-                    ),
-                );
+            if let Some(sharpness) = display.sharpness {
+                ui.weak(format!("sharpness {sharpness:.0}"));
             }
-            if let Some(sharpness) = shot.sharpness() {
-                ui.label(format!("Sharpness: {sharpness:.0}"));
-            }
-            if let Some(capture_time) = shot.capture_time() {
-                ui.label(format!(
-                    "Captured: {}",
-                    capture_time.format("%Y-%m-%d %H:%M:%S")
-                ));
-            }
-            if let Some(orientation) = shot.jpeg().and_then(|asset| asset.orientation) {
-                ui.label(format!("Orientation: {orientation}"));
+            if ui
+                .small_button(if self.zoom_for(index).is_some() {
+                    "Fit"
+                } else {
+                    "100%"
+                })
+                .clicked()
+            {
+                let zoom = if self.zoom_for(index).is_some() {
+                    None
+                } else {
+                    Some(1.0)
+                };
+                self.set_zoom_for(index, zoom);
             }
         });
-        ui.label(
-            shot.assets
-                .iter()
-                .map(|asset| asset.kind.label())
-                .collect::<Vec<_>>()
-                .join(" + "),
-        );
+        ui.horizontal(|ui| {
+            ui.weak(&display.asset_summary);
+            if let Some(capture_time) = &display.capture_time {
+                ui.weak(capture_time);
+            }
+            if let Some(burst) = display.burst {
+                ui.colored_label(egui::Color32::LIGHT_BLUE, format!("burst {}", burst.id));
+            }
+        });
 
-        let Some(asset) = shot.jpeg() else {
+        if let Some(error) = &display.preview_error {
+            ui.horizontal(|ui| {
+                ui.colored_label(egui::Color32::LIGHT_RED, "Preview unavailable");
+                ui.small(error);
+                if ui.small_button("Retry").clicked() {
+                    self.retry_mtp_preview(index);
+                }
+            });
+            return;
+        }
+        if !display.preview_known {
+            ui.centered_and_justified(|ui| {
+                ui.spinner();
+                ui.label("Fetching JPEG preview from the MTP device...");
+            });
+            return;
+        }
+        let zoomed = self.zoom_for(index).is_some();
+        let Some(key) =
+            self.preview_key(&display, if zoomed { None } else { Some(FIT_PREVIEW_EDGE) })
+        else {
             ui.centered_and_justified(|ui| {
                 ui.vertical_centered(|ui| {
                     ui.heading("No displayable JPEG companion");
-                    ui.label("The files remain paired for decisions and rejection.");
-                    ui.label(
-                        "Embedded RAW preview and HEIF decoding are the next viewer backend step.",
-                    );
+                    ui.label("The paired files remain available for decisions and rejection.");
                 });
             });
             return;
         };
-        let key = PreviewKey {
-            path: asset.path.clone(),
-            orientation: asset.orientation,
-            max_edge: if self.zoom.is_some() {
-                None
-            } else {
-                Some(FIT_PREVIEW_EDGE)
-            },
-        };
         self.request_preview(ui.ctx(), key.clone());
+        let Some(texture) = self.cached_preview(&key) else {
+            ui.centered_and_justified(|ui| {
+                ui.spinner();
+                ui.label(if zoomed {
+                    "Loading full-resolution preview..."
+                } else {
+                    "Loading preview..."
+                });
+            });
+            return;
+        };
         let available = ui.available_size();
-        if let Some(texture) = self.cached_preview(&key) {
-            let natural_size = texture.size_vec2();
-            let fit_scale = (available.x / natural_size.x)
-                .min(available.y / natural_size.y)
-                .min(1.0);
-            let scale = self.zoom.unwrap_or(fit_scale);
-            let desired_size = natural_size * scale;
+        let natural_size = texture.size_vec2();
+        let fit_scale = (available.x / natural_size.x)
+            .min(available.y / natural_size.y)
+            .min(1.0);
+        let scale = self.zoom_for(index).unwrap_or(fit_scale);
+        let desired_size = natural_size * scale;
+        ui.push_id(("preview-scroll", display.identity), |ui| {
             egui::ScrollArea::both()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     let response = ui.add(
                         egui::Image::from_texture(&texture)
                             .fit_to_exact_size(desired_size)
-                            .sense(egui::Sense::hover()),
+                            .sense(egui::Sense::click()),
                     );
+                    if response.double_clicked() {
+                        self.set_zoom_for(index, if zoomed { None } else { Some(1.0) });
+                    }
                     if response.hovered() {
                         let zoom_delta = ui.input(|input| input.zoom_delta());
                         if (zoom_delta - 1.0).abs() > f32::EPSILON {
-                            self.zoom = Some((scale * zoom_delta).clamp(0.05, 8.0));
+                            self.set_zoom_for(index, Some((scale * zoom_delta).clamp(0.05, 8.0)));
                         }
                     }
                 });
-        } else {
-            ui.centered_and_justified(|ui| {
-                ui.spinner();
-                ui.label(if self.zoom.is_some() {
-                    "Loading full-resolution pixel preview..."
-                } else {
-                    "Loading oriented preview..."
-                });
-            });
-        }
+        });
     }
 
-    fn direct_image_viewer(&mut self, ui: &mut egui::Ui) {
-        let index = self.selected + usize::from(self.compare_next);
-        let Some(session) = &self.direct_session else {
-            return;
-        };
-        let Some(shot) = session.shots.get(index) else {
-            ui.centered_and_justified(|ui| ui.label("No MTP shot selected"));
-            return;
-        };
-        let stem = shot.stem.clone();
-        let decision = shot.decision;
-        let summary = shot.asset_summary.clone();
-        let preview_path = shot.preview_path.clone();
+    fn bottom_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.strong(stem);
-            ui.label(decision.label());
-            if self.compare_next {
-                ui.colored_label(egui::Color32::LIGHT_BLUE, "A/B: next shot");
+            let has_session = self.has_session();
+            if ui
+                .add_enabled(has_session, egui::Button::new("← Previous"))
+                .clicked()
+            {
+                self.move_selection(-1);
             }
-        });
-        ui.label(summary);
-        let Some(path) = preview_path else {
-            ui.centered_and_justified(|ui| {
-                ui.label("No JPEG companion is available for this MTP shot");
-            });
-            return;
-        };
-        let key = PreviewKey {
-            path,
-            orientation: None,
-            max_edge: if self.zoom.is_some() {
-                None
-            } else {
-                Some(FIT_PREVIEW_EDGE)
-            },
-        };
-        self.request_preview(ui.ctx(), key.clone());
-        if let Some(texture) = self.cached_preview(&key) {
-            let natural_size = texture.size_vec2();
-            let available = ui.available_size();
-            let fit_scale = (available.x / natural_size.x)
-                .min(available.y / natural_size.y)
-                .min(1.0);
-            let scale = self.zoom.unwrap_or(fit_scale);
-            egui::ScrollArea::both()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    let response = ui.add(
-                        egui::Image::from_texture(&texture)
-                            .fit_to_exact_size(natural_size * scale)
-                            .sense(egui::Sense::hover()),
-                    );
-                    if response.hovered() {
-                        let zoom_delta = ui.input(|input| input.zoom_delta());
-                        if (zoom_delta - 1.0).abs() > f32::EPSILON {
-                            self.zoom = Some((scale * zoom_delta).clamp(0.05, 8.0));
-                        }
-                    }
-                });
-        } else {
-            ui.centered_and_justified(|ui| {
+            if ui
+                .add_enabled(has_session, egui::Button::new("Next →"))
+                .clicked()
+            {
+                self.move_selection(1);
+            }
+            if ui
+                .add_enabled(has_session, egui::Button::new("Next unrated"))
+                .on_hover_text("Tab")
+                .clicked()
+            {
+                self.move_to_next_unrated();
+            }
+            ui.separator();
+            if has_session {
+                let counts = self.decision_counts();
+                ui.weak(format!(
+                    "{} unrated  ·  {} keep  ·  {} reject",
+                    counts[0], counts[1], counts[2]
+                ));
+            } else if self.loading.is_some() {
                 ui.spinner();
-                ui.label("Loading cached MTP JPEG preview...");
+                ui.weak("Scanning album in background...");
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if let Some(error) = &self.error {
+                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                } else if let Some(notice) = &self.notice {
+                    ui.colored_label(egui::Color32::LIGHT_GREEN, notice);
+                }
             });
-        }
+        });
     }
 
     fn burst_settings_editor(&mut self, ctx: &egui::Context) {
@@ -1003,7 +1382,7 @@ impl MyApp {
                 if ui
                     .add_enabled(
                         self.selected_mtp_device.is_some() && self.selected_mtp_folder.is_some(),
-                        egui::Button::new("Cache JPEG previews and start culling"),
+                        egui::Button::new("Start culling (previews load on demand)"),
                     )
                     .clicked()
                     && let (Some(device_id), Some(source_folder_id)) = (
@@ -1033,7 +1412,9 @@ impl MyApp {
             {
                 self.error = Some(format!("Could not start MTP culling: {error:#}"));
             } else {
-                self.notice = Some("Caching JPEG previews from the MTP device...".to_owned());
+                self.notice = Some(
+                    "Scanning MTP files; the first previews will load on demand...".to_owned(),
+                );
             }
         }
         self.show_mtp_picker = open;
@@ -1248,21 +1629,11 @@ impl eframe::App for MyApp {
 
         egui::Panel::top("toolbar").show(ui, |ui| self.top_bar(ui));
         egui::Panel::right("shots")
-            .default_size(280.0)
+            .default_size(328.0)
+            .resizable(true)
             .show(ui, |ui| self.shot_list(ui));
         egui::CentralPanel::default().show(ui, |ui| self.image_viewer(ui));
-        egui::Panel::bottom("status").show(ui, |ui| {
-            if self.loading.is_some() {
-                ui.spinner();
-                ui.label("Scanning, pairing, and fingerprinting files in the background...");
-            }
-            if let Some(notice) = &self.notice {
-                ui.colored_label(egui::Color32::LIGHT_GREEN, notice);
-            }
-            if let Some(error) = &self.error {
-                ui.colored_label(egui::Color32::LIGHT_RED, error);
-            }
-        });
+        egui::Panel::bottom("status").show(ui, |ui| self.bottom_bar(ui));
 
         self.shortcut_editor(&ctx);
         self.burst_settings_editor(&ctx);
@@ -1270,6 +1641,14 @@ impl eframe::App for MyApp {
         self.import_review(&ctx);
         self.reject_review(&ctx);
         self.keep_all_confirmation(&ctx);
+    }
+}
+
+fn decision_color(decision: Decision) -> egui::Color32 {
+    match decision {
+        Decision::Keep => egui::Color32::from_rgb(100, 205, 130),
+        Decision::Reject => egui::Color32::from_rgb(220, 105, 105),
+        Decision::Unrated => egui::Color32::from_rgb(220, 180, 80),
     }
 }
 

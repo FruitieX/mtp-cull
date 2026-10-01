@@ -4,32 +4,38 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
 
+[features]
+default = []
+turbo = ["dep:turbojpeg"]
+ui-smoke = ["image/png"]
+
 [dependencies]
-blake3 = "1.8.5"
+blake3 = "1.8.7"
 chrono = "0.4.45"
-clap = { version = "4.6.1", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive"] }
 color-eyre = "0.6.5"
 directories = "6.0.0"
-eframe = "0.35.0"
-egui_extras = { version = "0.35.0", features = [
-    "image",
-    "file",
-] }
+eframe = "0.36.2"
 env_logger = "0.11.11"
 kamadak-exif = "0.6.1"
 humantime = "2.4.0"
 image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
-log = "0.4.33"
+log = "0.4.34"
 rfd = "0.17.2"
-rusqlite = { version = "0.40.1", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0"
+turbojpeg = { version = "1.5.1", optional = true, default-features = false, features = ["cmake", "require-simd"] }
 size = "0.5.0"
-tempfile = "3.23.0"
-trash = "5.2.6"
-url = "2.5.7"
+tempfile = "3.27.0"
+
+[dev-dependencies]
+# Retained only for the retired culling database regression tests.
+trash = "5.2.9"
 
 [target.'cfg(windows)'.dependencies]
 winmtp = "0.3.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-futures = "0.3"
-mtp-rs = "=0.23.0"
+futures = "0.3.34"
+mtp-rs = "=0.32.0"
