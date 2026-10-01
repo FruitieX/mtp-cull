@@ -38,6 +38,7 @@ impl Smoke {
         }))
     }
     pub fn fail(&mut self, ctx: &egui::Context, message: &str) {
+        let _ = std::fs::remove_file(self.root.join("PASS.txt"));
         let _ = std::fs::write(self.root.join("FAILED.txt"), message);
         self.step = 255;
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -256,9 +257,46 @@ impl Smoke {
                         self.root.join("PASS.txt"),
                         format!("{text}Session resume: PASS\n"),
                     )?;
-                    self.step = 255;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    app.command(Command::Settings);
+                    self.step = 12;
+                    self.frames = 0;
                 }
+            }
+            12 => {
+                self.capture(ctx, "settings");
+                self.step = 13;
+            }
+            13 => {
+                app.settings_tab = 1;
+                self.step = 16;
+                self.frames = 0;
+            }
+            16 => {
+                self.capture(ctx, "settings-performance");
+                self.step = 17;
+            }
+            17 => {
+                app.settings_tab = 2;
+                self.step = 18;
+                self.frames = 0;
+            }
+            18 => {
+                self.capture(ctx, "settings-shortcuts");
+                self.step = 19;
+            }
+            19 => {
+                app.settings_open = false;
+                app.command(Command::Close);
+                self.step = 14;
+                self.frames = 0;
+            }
+            14 => {
+                self.capture(ctx, "welcome");
+                self.step = 15;
+            }
+            15 => {
+                self.step = 255;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             _ => bail!("invalid smoke step"),
         }

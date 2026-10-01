@@ -88,3 +88,19 @@ These require the respective hardware/environment. RAW rendering, video playback
 color-managed previews, automatic registration/face suggestions and offline manifest
 browsing remain future scope. Initial decoder measurements use generated 40 MP JPEGs;
 real camera JPEG benchmarking remains part of the hardware checks.
+
+## October 2026 UI refresh
+
+- [x] Commit and push the functional checkpoint before changing the presentation.
+- [x] Integrate remote CLI improvements while prioritizing the new culling implementation.
+- [x] Apply a consistent dark palette, spacing and restrained accent colors.
+- [x] Group review/comparison tools and move filters next to the filmstrip.
+- [x] Simplify thumbnail states and keep progress/errors visible in the compact footer.
+- [x] Move diagnostics to a popup and split Settings into three tabs with visible Save/Cancel.
+- [x] Fix duplicate shortcut IDs and migrate legacy default bindings.
+- [x] Verify native rendering at 1440p and 1024x768, including all Settings tabs.
+
+The physical X-T5 successfully staged 232 JPEGs, with stable metadata available
+for cache reuse. The user reports smooth animated zoom and pan on a 240 Hz display;
+this is qualitative hardware feedback, not an instrumented latency measurement.
+Disconnect/reconnect, NAS imports and native Linux checks remain as listed above.

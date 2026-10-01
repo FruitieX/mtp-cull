@@ -100,7 +100,35 @@ the second to skip. `PASS.txt`/`FAILED.txt` and PNG captures record results, the
 the app exits. The harness requires its database inside its output directory.
 Without `ui-smoke` and its environment variables, no scripted UI work runs.
 
-The regular suite currently passes 40 tests (two heavy fixture/benchmark tests
+The September verification suite passed 40 tests (two heavy fixture/benchmark tests
 are opt-in). The Linux backend/API harness passes 14 tests and strict Clippy on
 the Windows host. That harness is a local verification aid under ignored target/;
 native Linux CI and physical USB integration remain separate checks.
+
+## October 2026 UI refresh verification
+
+The new presentation keeps the viewer, decode queue and image-cache implementations
+unchanged. Native GPU smoke now runs at full 2560x1440 (DPI 1), and separately at
+1024x768 to check smaller-window layouts. It also captures the welcome screen and
+Review/Performance/Shortcuts settings tabs. Set `MTP_CULL_SMOKE_SIZE=1024x768` to
+repeat the compact-window run; the default remains 2560x1440.
+
+The functional suite now includes the merged CLI request/retry path, safe-copy
+regressions and distinct persisted shortcut IDs. Windows has 44 passing tests
+and two opt-in fixture/benchmark tests; the Windows-hosted Linux adapter/API
+harness has 21 passing tests. Formatting and strict Clippy pass.
+
+The physical X-T5 has staged 232 JPEGs successfully. The user reports smooth
+animated zoom and pan on a 240 Hz display. NAS import, disconnect/reconnect,
+high-DPI scaling and instrumented presentation latency still require validation.
+
+Final refresh runs used 117 warm frame samples each, with generated 40 MP fixtures:
+
+| Native viewport (DPI 1) | Median UI CPU | p95 | Maximum |
+| --- | --- | --- | --- |
+| 2560x1440 | 0.266 ms | 0.435 ms | 0.584 ms |
+| 1024x768 | 0.232 ms | 0.333 ms | 0.482 ms |
+
+These are application/UI CPU times, excluding GPU presentation and input-to-photon
+latency. Both runs pass comparison/focus, linked selections, import/retry and resume.
+Settings screenshots confirm visible Save/Cancel controls without binding conflicts.

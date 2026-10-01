@@ -18,6 +18,7 @@ measurements and their limits. The original design remains in
 | File | Responsibility |
 | --- | --- |
 | `app.rs` | UI orchestration, source picker, filters, filmstrip and dialogs |
+| `theme.rs` | Dark palette, shared spacing, grouped controls and panel styling |
 | `review.rs` | Metadata index, pairing, linking, decisions and undo/redo |
 | `review_commands.rs` | Configurable registry, exact shortcut matching/conflicts |
 | `review_store.rs` | SQLite settings, decisions and comparison resume state |
@@ -69,3 +70,19 @@ outside this implementation. Focus scores remain hints, particularly with high
 ISO noise or unlike textures. Native full-image GPU uploads can still exceed a
 frame budget on cold navigation; tiling is a possible follow-up after real JPEG
 and presentation measurements.
+
+## October 2026 checkpoint and UI polish
+
+Checkpoint `855d1bf` was preserved and pushed with the remote CLI integration in
+merge `60ffe77`. The CLI now uses the same worker on Windows and Linux; the retired
+Windows CLI backend and disposable preview cache were superseded.
+
+The UI has neutral dark panels, mint accents, grouped comparison controls,
+filmstrip filters, a compact status bar, and Review/Performance/Shortcuts settings
+tabs. Viewer rendering/transforms, image loading and culling semantics remain
+unchanged. Command IDs for all-media and all-decisions filters are now distinct;
+legacy editor-generated Shift+A bindings migrate to the decision filter without
+altering other customizations.
+
+Native smoke checks cover 2560x1440 and 1024x768, including Settings tabs and the
+welcome screen. See performance documentation for timings and limitations.

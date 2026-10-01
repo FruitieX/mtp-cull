@@ -114,7 +114,7 @@ pub const COMMANDS: &[Spec] = &[
     },
     Spec {
         command: Command::FilterAll,
-        id: "filter_all",
+        id: "decision_filter_all",
         label: "Show all decisions",
         key: "Shift+A",
     },
@@ -518,6 +518,21 @@ pub fn consume(events: &mut Vec<egui::Event>, shortcut: &egui::KeyboardShortcut)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn editor_defaults_have_unique_ids_and_independent_all_filters() {
+        let bindings = COMMANDS
+            .iter()
+            .map(|spec| (spec.id.to_owned(), spec.key.to_owned()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            bindings.len(),
+            COMMANDS.len(),
+            "command IDs must be unique for persistence"
+        );
+        validate(&bindings).unwrap();
+        assert_eq!(bindings["filter_all"], "A");
+        assert_eq!(bindings["decision_filter_all"], "Shift+A");
+    }
     #[test]
     fn shifted_commands_do_not_trigger_plain_commands() {
         let mut events = vec![egui::Event::Key {

@@ -40,12 +40,17 @@ The MTP CLI commands support Windows and Linux through the same device worker.
 3. Pin A and browse B. Use side-by-side, vertical wipe, or hold-to-blink comparison.
    Both images share zoom and pan. 100% maps a source pixel to a physical screen
    pixel, including Windows scaling. Alt-drag B for manual alignment.
-4. Enable **Focus** for native-resolution green peaking. Draw or create a shared
+4. Open **Focus** and enable **Sharpness overlay** for native-resolution green peaking. Draw or create a shared
    comparison region to see both region scores. Adjust threshold and opacity.
    These are inspection aids; noise, texture and JPEG processing affect scores.
 5. Open **Import selected**, choose JPEG/RAW/video destinations, date and album,
    and copy. Videos default to selected and included. Unreviewed JPEGs are excluded.
    Destination layout is `root/Out-of-camera|Undeveloped|Video/year/date album/name`.
+
+The toolbar groups decisions, pin/swap, comparison mode, zoom and focus tools.
+Media and decision filters sit above the filmstrip. **More** opens Settings,
+keyboard help and the command palette; **Performance** in the footer shows cache
+and frame diagnostics. Settings has separate Review, Performance and Shortcuts tabs.
 
 JPEG/RAW/Video and decision filters change visibility independently of selection.
 Disabling linking restores independent RAW decisions. RAW and video entries use

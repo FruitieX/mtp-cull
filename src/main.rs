@@ -16,6 +16,7 @@ mod review;
 mod review_commands;
 mod review_store;
 mod safe_copy;
+mod theme;
 mod transfer_progress;
 #[path = "app.rs"]
 mod ui;

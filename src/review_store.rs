@@ -88,10 +88,22 @@ impl Store {
                 r.get(0)
             })
             .optional()?;
-        Ok(json
+        let mut settings: Settings = json
             .map(|j| serde_json::from_str(&j))
             .transpose()?
-            .unwrap_or_default())
+            .unwrap_or_default();
+        // Earlier editors populated both all-filter commands under the same ID.
+        // Shift+A was inserted first, unintentionally overriding the media A binding.
+        if !settings.bindings.contains_key("decision_filter_all")
+            && settings
+                .bindings
+                .get("filter_all")
+                .is_some_and(|key| key == "Shift+A")
+        {
+            let key = settings.bindings.remove("filter_all").unwrap();
+            settings.bindings.insert("decision_filter_all".into(), key);
+        }
+        Ok(settings)
     }
     pub fn review(&self, id: &str) -> Result<SavedReview> {
         if let Some(review) = self.pending.borrow().get(id) {
@@ -144,6 +156,26 @@ impl Drop for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_all_filter_binding_is_split_without_losing_customizations() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("review.sqlite3");
+        {
+            let store = Store::at(path.clone()).unwrap();
+            let mut settings = Settings::default();
+            settings
+                .bindings
+                .insert("filter_all".into(), "Shift+A".into());
+            settings.bindings.insert("keep".into(), "3".into());
+            store.save_settings(&settings);
+        }
+        let store = Store::at(path).unwrap();
+        let settings = store.settings().unwrap();
+        assert!(!settings.bindings.contains_key("filter_all"));
+        assert_eq!(settings.bindings["decision_filter_all"], "Shift+A");
+        assert_eq!(settings.bindings["keep"], "3");
+        crate::review_commands::validate(&settings.bindings).unwrap();
+    }
     #[test]
     fn writes_flush_on_close_and_other_sessions_are_isolated() {
         let dir = tempfile::tempdir().unwrap();

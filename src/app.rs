@@ -4,6 +4,7 @@ use crate::mtp_worker::{ImportPaths, MtpDevice, MtpEvent, MtpRequest, MtpWorker,
 use crate::review::{self, Decision, History, Kind, Session, Settings, Source};
 use crate::review_commands::{self, COMMANDS, Command};
 use crate::review_store::{SavedReview, Store};
+use crate::theme;
 use crate::viewer::{Canvas, Mode, ViewImage};
 use chrono::{Local, NaiveDate};
 use color_eyre::eyre::Result;
@@ -25,9 +26,15 @@ pub fn init(args: &crate::cli::UiArgs) -> Result<()> {
         .with_maximized(true);
     #[cfg(feature = "ui-smoke")]
     let viewport = if std::env::var_os("MTP_CULL_SMOKE_DIR").is_some() {
-        viewport
-            .with_maximized(false)
-            .with_inner_size(egui::vec2(2560.0, 1440.0))
+        let size = std::env::var("MTP_CULL_SMOKE_SIZE")
+            .ok()
+            .and_then(|value| {
+                let (width, height) = value.split_once('x')?;
+                Some(egui::vec2(width.parse().ok()?, height.parse().ok()?))
+            })
+            .filter(|size| size.x >= 640.0 && size.y >= 480.0)
+            .unwrap_or(egui::vec2(2560.0, 1440.0));
+        viewport.with_maximized(false).with_inner_size(size)
     } else {
         viewport
     };
@@ -39,7 +46,7 @@ pub fn init(args: &crate::cli::UiArgs) -> Result<()> {
         "mtp-cull",
         options,
         Box::new(|cc| {
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            theme::install(&cc.egui_ctx);
             let mut app = App::new()?;
             if let Some((root, raw)) = initial {
                 let (sender, receiver) = mpsc::channel();
@@ -92,6 +99,7 @@ struct App {
     camera_busy: bool,
     camera_picker: bool,
     settings_open: bool,
+    settings_tab: u8,
     import_open: bool,
     help_open: bool,
     palette_open: bool,
@@ -146,6 +154,7 @@ impl App {
             camera_busy: false,
             camera_picker: false,
             settings_open: false,
+            settings_tab: 0,
             import_open: false,
             help_open: false,
             palette_open: false,
@@ -271,9 +280,7 @@ impl App {
         if ephemeral > 0 {
             reconciliation.push_str(" Camera timestamps are unavailable for some files; their decisions will require review on reconnect.");
         }
-        self.message = Some(format!(
-            "Use 1 / 2 / Space to choose. Pin A with P, compare with C.{reconciliation}"
-        ));
+        self.message = (!reconciliation.is_empty()).then_some(reconciliation);
     }
     fn refresh_visible(&mut self) {
         self.visible = self
@@ -788,7 +795,9 @@ impl App {
                     } else {
                         done as f32 / total as f32
                     };
-                    self.message = Some(format!("{operation}: {name}"));
+                    if operation != "staging" {
+                        self.message = Some(format!("{operation}: {name}"));
+                    }
                 }
                 MtpEvent::Staging {
                     ready,
@@ -1014,84 +1023,385 @@ impl App {
             self.staging_request = Some(request);
         }
     }
+    fn command_button(&mut self, ui: &mut egui::Ui, label: &str, command: Command) {
+        if ui
+            .button(label)
+            .on_hover_text(self.button_text(label, command))
+            .clicked()
+        {
+            self.command(command);
+        }
+    }
     fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            ui.strong("mtp-cull");
-            for (text, command) in [
-                ("Open folder", Command::Open),
-                ("Camera", Command::Camera),
-                ("Import selected", Command::Import),
-                ("Settings", Command::Settings),
-                ("Help", Command::Help),
-                ("Close", Command::Close),
-            ] {
-                if ui.button(text).clicked() {
-                    self.command(command);
-                }
-            }
-            ui.separator();
-            for (kind, label) in [
-                (Some(Kind::Jpeg), "JPEG"),
-                (Some(Kind::Raw), "RAW"),
-                (Some(Kind::Video), "Video"),
-                (None, "All"),
-            ] {
-                if ui
-                    .selectable_label(self.media_filter == kind, label)
-                    .clicked()
-                {
-                    self.media_filter = kind;
-                    self.refresh_visible();
-                }
-            }
-            ui.separator();
-            for (filter, label) in [
-                (None, "All decisions"),
-                (Some(Decision::Unreviewed), "Unreviewed"),
-                (Some(Decision::Keep), "Kept"),
-                (Some(Decision::Reject), "Rejected"),
-            ] {
-                if ui
-                    .selectable_label(self.decision_filter == filter, label)
-                    .clicked()
-                {
-                    self.decision_filter = filter;
-                    self.refresh_visible();
-                }
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            for (label, command) in [
-                ("Reject", Command::Reject),
-                ("Keep", Command::Keep),
-                ("Clear", Command::Clear),
-                ("Undo", Command::Undo),
-                ("Pin A", Command::Pin),
-                ("Fit / 100%", Command::Zoom),
-            ] {
-                if ui.button(self.button_text(label, command)).clicked() {
-                    self.command(command);
-                }
-            }
-            for mode in [Mode::Single, Mode::SideBySide, Mode::Wipe] {
-                if ui
-                    .selectable_label(self.canvas.mode == mode, mode.label())
-                    .clicked()
-                {
-                    if mode != Mode::Single && self.pinned.is_none() {
-                        self.command(Command::Pin);
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(25.0, 25.0), egui::Sense::hover());
+            let painter = ui.painter();
+            painter.rect_filled(rect, 7, theme::ACCENT_BG);
+            painter.rect_stroke(
+                rect.shrink(6.0),
+                3,
+                egui::Stroke::new(1.5, theme::ACCENT),
+                egui::StrokeKind::Inside,
+            );
+            painter.circle_stroke(rect.center(), 3.0, egui::Stroke::new(1.5, theme::ACCENT));
+            ui.label(egui::RichText::new("mtp-cull").size(17.0).strong());
+            ui.add_space(14.0);
+            self.command_button(ui, "Open folder", Command::Open);
+            self.command_button(ui, "Camera", Command::Camera);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button("More", |ui| {
+                    for (label, command) in [
+                        ("Settings", Command::Settings),
+                        ("Keyboard shortcuts", Command::Help),
+                        ("Command palette", Command::Palette),
+                    ] {
+                        if ui.button(self.button_text(label, command)).clicked() {
+                            self.command(command);
+                            ui.close();
+                        }
                     }
-                    self.canvas.mode = mode;
+                    ui.separator();
+                    if ui
+                        .add_enabled(self.session.is_some(), egui::Button::new("Close session"))
+                        .clicked()
+                    {
+                        self.command(Command::Close);
+                        ui.close();
+                    }
+                });
+                if ui
+                    .add_enabled(
+                        self.session.is_some() && !self.camera_busy && self.import.is_none(),
+                        egui::Button::new(
+                            egui::RichText::new("Import selected")
+                                .color(theme::BACKGROUND)
+                                .strong(),
+                        )
+                        .fill(theme::ACCENT)
+                        .stroke(egui::Stroke::NONE),
+                    )
+                    .on_hover_text(self.button_text(
+                        "Copy selected originals to your destinations",
+                        Command::Import,
+                    ))
+                    .clicked()
+                {
+                    self.command(Command::Import);
                 }
+            });
+        });
+        if self.session.is_none() {
+            return;
+        }
+        ui.add_space(5.0);
+        ui.add_enabled_ui(self.session.is_some(), |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                theme::group(ui, |ui| {
+                    for (label, command, color, fill) in [
+                        ("Keep", Command::Keep, theme::ACCENT, theme::ACCENT_BG),
+                        (
+                            "Reject",
+                            Command::Reject,
+                            theme::REJECT,
+                            egui::Color32::from_rgb(59, 39, 43),
+                        ),
+                    ] {
+                        let binding = COMMANDS
+                            .iter()
+                            .find(|s| s.command == command)
+                            .map(|s| {
+                                self.settings
+                                    .bindings
+                                    .get(s.id)
+                                    .map_or(s.key, String::as_str)
+                            })
+                            .unwrap_or_default();
+                        if ui
+                            .add(
+                                egui::Button::new(egui::RichText::new(label).color(color).strong())
+                                    .fill(fill)
+                                    .stroke(egui::Stroke::NONE)
+                                    .shortcut_text(binding),
+                            )
+                            .on_hover_text(self.button_text(label, command))
+                            .clicked()
+                        {
+                            self.command(command);
+                        }
+                    }
+                    self.command_button(ui, "Clear", Command::Clear);
+                    self.command_button(ui, "Undo", Command::Undo);
+                });
+                theme::group(ui, |ui| {
+                    self.command_button(ui, "Pin A", Command::Pin);
+                    ui.add_enabled_ui(self.pinned.is_some(), |ui| {
+                        self.command_button(ui, "Swap", Command::Swap)
+                    });
+                });
+                theme::group(ui, |ui| {
+                    for (mode, label) in [
+                        (Mode::Single, "Single"),
+                        (Mode::SideBySide, "Side by side"),
+                        (Mode::Wipe, "Wipe"),
+                    ] {
+                        if theme::tab(ui, self.canvas.mode == mode, label)
+                            .on_hover_text(
+                                self.button_text("Cycle comparison mode", Command::Compare),
+                            )
+                            .clicked()
+                        {
+                            if mode != Mode::Single && self.pinned.is_none() {
+                                self.command(Command::Pin);
+                            }
+                            self.canvas.mode = mode;
+                        }
+                    }
+                });
+                theme::group(ui, |ui| {
+                    let label = match self.canvas.viewport.zoom {
+                        Some(zoom) => format!("{:.0}%", zoom * 100.0),
+                        None => "Fit".into(),
+                    };
+                    self.command_button(ui, &label, Command::Zoom);
+                    ui.menu_button(
+                        if self.canvas.peaking || self.canvas.region_tool {
+                            "Focus •"
+                        } else {
+                            "Focus"
+                        },
+                        |ui| {
+                            ui.set_min_width(230.0);
+                            ui.strong("Focus inspection");
+                            ui.checkbox(&mut self.canvas.peaking, "Sharpness overlay")
+                                .on_hover_text(
+                                    self.button_text("Toggle focus peaking", Command::Peaking),
+                                );
+                            ui.checkbox(&mut self.canvas.region_tool, "Compare a region")
+                                .on_hover_text(
+                                    self.button_text("Toggle comparison region", Command::Region),
+                                );
+                            ui.separator();
+                            ui.add(
+                                egui::Slider::new(&mut self.canvas.threshold, 1..=100)
+                                    .text("Threshold"),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut self.canvas.opacity, 20..=240)
+                                    .text("Opacity"),
+                            );
+                            ui.separator();
+                            self.command_button(ui, "Clear region", Command::ClearRegion);
+                            ui.label(
+                                egui::RichText::new("Hold the blink shortcut to alternate A / B.")
+                                    .small()
+                                    .color(theme::MUTED),
+                            )
+                            .on_hover_text(self.button_text("Hold to blink", Command::Blink));
+                        },
+                    );
+                });
+            });
+        });
+    }
+    fn filters(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            theme::group(ui, |ui| {
+                for (kind, label) in [
+                    (Some(Kind::Jpeg), "JPEG"),
+                    (Some(Kind::Raw), "RAW"),
+                    (Some(Kind::Video), "Video"),
+                    (None, "All"),
+                ] {
+                    if theme::tab(ui, self.media_filter == kind, label).clicked() {
+                        self.media_filter = kind;
+                        self.refresh_visible();
+                    }
+                }
+            });
+            let before = self.decision_filter;
+            egui::ComboBox::from_id_salt("decision-filter")
+                .selected_text(match self.decision_filter {
+                    None => "All decisions",
+                    Some(Decision::Keep) => "Kept",
+                    Some(Decision::Reject) => "Rejected",
+                    Some(Decision::Unreviewed) => "Unreviewed",
+                })
+                .width(125.0)
+                .show_ui(ui, |ui| {
+                    for (filter, label) in [
+                        (None, "All decisions"),
+                        (Some(Decision::Unreviewed), "Unreviewed"),
+                        (Some(Decision::Keep), "Kept"),
+                        (Some(Decision::Reject), "Rejected"),
+                    ] {
+                        ui.selectable_value(&mut self.decision_filter, filter, label);
+                    }
+                });
+            if self.decision_filter != before {
+                self.refresh_visible();
             }
-            let focus_label = self.button_text("Focus", Command::Peaking);
-            let region_label = self.button_text("Region", Command::Region);
-            ui.checkbox(&mut self.canvas.peaking, focus_label);
-            ui.checkbox(&mut self.canvas.region_tool, region_label);
-            if self.canvas.peaking {
-                ui.add(egui::Slider::new(&mut self.canvas.threshold, 1..=100).text("Threshold"));
-                ui.add(egui::Slider::new(&mut self.canvas.opacity, 20..=240).text("Opacity"));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let position = self
+                    .visible
+                    .iter()
+                    .position(|i| *i == self.selected)
+                    .map_or(0, |p| p + 1);
+                ui.label(
+                    egui::RichText::new(format!("{position} / {}", self.visible.len()))
+                        .color(theme::MUTED),
+                );
+                if let Some(session) = &self.session {
+                    let kept = session
+                        .shots
+                        .iter()
+                        .filter(|shot| {
+                            shot.decision(
+                                shot.review_kind(self.media_filter),
+                                self.settings.link_raw,
+                            ) == Decision::Keep
+                        })
+                        .count();
+                    ui.label(egui::RichText::new(format!("{kept} kept")).color(theme::ACCENT));
+                }
+            });
+        });
+    }
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
+        if !self.camera_busy
+            && self.import.is_none()
+            && let Some(message) = &self.message
+        {
+            ui.add(
+                egui::Label::new(egui::RichText::new(message).small().color(theme::MUTED))
+                    .truncate(),
+            )
+            .on_hover_text(message);
+        }
+        if let Some(error) = self.error.clone() {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(theme::REJECT, error);
+                if ui.small_button("Dismiss").clicked() {
+                    self.error = None;
+                }
+            });
+        }
+        let progress = if let Some(import) = &self.import {
+            Some((import.progress, import.text.clone()))
+        } else if self.camera_busy {
+            Some((
+                self.camera_progress,
+                self.message
+                    .clone()
+                    .unwrap_or_else(|| "Connecting to camera…".into()),
+            ))
+        } else {
+            None
+        };
+        if let Some((value, text)) = progress {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::ProgressBar::new(value)
+                        .desired_width((ui.available_width() - 90.0).max(80.0))
+                        .desired_height(18.0)
+                        .text(text),
+                );
+                self.command_button(ui, "Cancel", Command::Cancel);
+            });
+        }
+        ui.horizontal(|ui| {
+            let source = self.session.as_ref().map(|session| match &session.source {
+                Source::Local { root, raw } => (
+                    root.file_name()
+                        .unwrap_or(root.as_os_str())
+                        .to_string_lossy()
+                        .into_owned(),
+                    format!(
+                        "{}{}",
+                        root.display(),
+                        raw.as_ref()
+                            .map(|p| format!(" · RAW {}", p.display()))
+                            .unwrap_or_default()
+                    ),
+                ),
+                Source::Mtp { device, folder } => {
+                    let name = self
+                        .devices
+                        .iter()
+                        .find(|d| d.id == *device)
+                        .map_or("Camera", |d| d.name.as_str());
+                    let path = self
+                        .folders
+                        .iter()
+                        .find(|f| f.id == *folder)
+                        .map_or("Selected folder", |f| f.path.as_str());
+                    (name.into(), format!("{name} · {path}"))
+                }
+            });
+            if self.loader.is_some() {
+                ui.spinner();
+                ui.weak("Opening photos…");
+            } else if let Some((name, detail)) = source {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(name).small().color(theme::MUTED))
+                        .truncate(),
+                )
+                .on_hover_text(detail);
+                if !self.staging_text.is_empty() {
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new(&self.staging_text).small().color(
+                        if self.staging_active {
+                            theme::ACCENT
+                        } else {
+                            theme::MUTED
+                        },
+                    ));
+                }
+            } else {
+                ui.weak("Ready to review");
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button("Performance", |ui| {
+                    ui.set_min_width(230.0);
+                    ui.strong("Preview cache");
+                    ui.label(format!(
+                        "CPU {:.0} MiB · GPU {:.0} MiB",
+                        self.cache.bytes() as f64 / 1048576.0,
+                        self.canvas.bytes() as f64 / 1048576.0
+                    ));
+                    ui.label(format!(
+                        "UI {:.2} ms · mean decode {:.1} ms",
+                        self.frame_ms,
+                        self.cache.stats.decode_ms / self.cache.stats.decodes.max(1) as f64
+                    ));
+                });
+                let notice = self
+                    .message
+                    .as_deref()
+                    .unwrap_or("Changes save automatically. Use the shortcuts to review faster.");
+                if self.session.is_some() {
+                    ui.label(
+                        egui::RichText::new("Decisions saved")
+                            .small()
+                            .color(theme::MUTED),
+                    )
+                    .on_hover_text(notice);
+                }
+                if self.staging_active || self.staging_paused {
+                    self.command_button(
+                        ui,
+                        if self.staging_paused {
+                            "Resume staging"
+                        } else {
+                            "Pause staging"
+                        },
+                        Command::Pause,
+                    );
+                }
+                if self.worker.is_some() && !self.camera_busy {
+                    self.command_button(ui, "Retry", Command::Retry);
+                }
+            });
         });
     }
     fn filmstrip(&mut self, ui: &mut egui::Ui) {
@@ -1103,9 +1413,9 @@ impl App {
         egui::ScrollArea::horizontal()
             .id_salt("filmstrip")
             .show_viewport(ui, |ui, viewport| {
-                let width = 112.0;
+                let width = 124.0;
                 let total = visible.len() as f32 * width;
-                ui.set_min_size(egui::vec2(total, 115.0));
+                ui.set_min_size(egui::vec2(total, 119.0));
                 let first = (viewport.min.x / width).floor().max(0.0) as usize;
                 let end = ((viewport.max.x / width).ceil() as usize + 1).min(visible.len());
                 let origin = ui.min_rect().min;
@@ -1114,7 +1424,7 @@ impl App {
                     let shot = &session.shots[index];
                     let rect = egui::Rect::from_min_size(
                         origin + egui::vec2(position as f32 * width, 0.0),
-                        egui::vec2(width - 4.0, 110.0),
+                        egui::vec2(width - 8.0, 115.0),
                     );
                     let response =
                         ui.interact(rect, ui.id().with(("shot", index)), egui::Sense::click());
@@ -1128,15 +1438,24 @@ impl App {
                         rect,
                         4.0,
                         if index == self.selected {
-                            egui::Color32::from_rgb(42, 61, 82)
+                            theme::ACCENT_BG
                         } else {
-                            egui::Color32::from_rgb(27, 30, 35)
+                            theme::SURFACE
                         },
                     );
                     ui.painter().rect_stroke(
                         rect,
                         4.0,
-                        egui::Stroke::new(if index == self.selected { 2.0 } else { 1.0 }, color),
+                        egui::Stroke::new(
+                            if index == self.selected { 2.0 } else { 1.0 },
+                            if index == self.selected {
+                                theme::ACCENT
+                            } else if response.hovered() {
+                                theme::MUTED
+                            } else {
+                                theme::BORDER
+                            },
+                        ),
                         egui::StrokeKind::Inside,
                     );
                     if let Some(path) = shot.preview() {
@@ -1159,7 +1478,10 @@ impl App {
                             );
                         }
                         if let Some(texture) = self.thumbnails.get(&key) {
-                            let area = rect.shrink2(egui::vec2(6.0, 20.0));
+                            let area = egui::Rect::from_min_max(
+                                rect.min + egui::vec2(6.0, 6.0),
+                                rect.max - egui::vec2(6.0, 40.0),
+                            );
                             let image_size = texture.size_vec2();
                             let scale =
                                 (area.width() / image_size.x).min(area.height() / image_size.y);
@@ -1174,7 +1496,7 @@ impl App {
                         }
                     }
                     ui.painter().text(
-                        rect.left_top() + egui::vec2(5.0, 4.0),
+                        rect.left_bottom() + egui::vec2(8.0, -33.0),
                         egui::Align2::LEFT_TOP,
                         &shot.name,
                         egui::FontId::proportional(12.0),
@@ -1202,10 +1524,19 @@ impl App {
                         }
                     );
                     ui.painter().text(
-                        rect.left_bottom() + egui::vec2(5.0, -4.0),
+                        rect.left_bottom() + egui::vec2(8.0, -5.0),
                         egui::Align2::LEFT_BOTTOM,
                         detail,
                         egui::FontId::proportional(11.0),
+                        if shot.conflict() {
+                            theme::REJECT
+                        } else {
+                            color
+                        },
+                    );
+                    ui.painter().circle_filled(
+                        rect.right_bottom() + egui::vec2(-10.0, -12.0),
+                        2.5,
                         color,
                     );
                     response.on_hover_text(
@@ -1239,33 +1570,76 @@ impl App {
     fn dialogs(&mut self, ctx: &egui::Context) {
         if self.settings_open {
             let mut open = true;
-            egui::Window::new("Settings and shortcuts").open(&mut open).default_width(650.0).show(ctx,|ui|{
-                ui.checkbox(&mut self.draft_settings.link_raw,"Link JPEG selections to corresponding RAW files");
-                ui.small("Independent RAW choices are retained when linking is on and restored when it is off.");
-                ui.checkbox(&mut self.draft_settings.include_videos,"Include selected videos in import (default on)");
-                ui.checkbox(&mut self.draft_settings.auto_advance,"Advance after deciding candidate B");
-                ui.checkbox(&mut self.draft_settings.group_bursts,"Group similar captures into bursts (background)");
-                ui.add(egui::Slider::new(&mut self.draft_settings.burst_window_ms,100..=10000).text("Burst interval ms"));
-                ui.add(egui::Slider::new(&mut self.draft_settings.burst_distance,0..=32).text("Burst similarity distance"));
-                if let Some(session)=&self.session {ui.label(format!("Import with these settings: {} assets",session.selected_ids(&self.draft_settings).len()));}
-                ui.add(egui::Slider::new(&mut self.draft_settings.cpu_cache_mib,256..=16384).text("CPU cache MiB"));
-                ui.add(egui::Slider::new(&mut self.draft_settings.gpu_cache_mib,128..=2048).text("GPU cache MiB"));
-                ui.add(egui::Slider::new(&mut self.draft_settings.disk_cache_gib,1..=128).text("Staging disk quota GiB"));
-                egui::ScrollArea::vertical().max_height(340.0).show(ui,|ui|{
-                    for spec in COMMANDS {
-                        ui.horizontal(|ui|{
-                            ui.label(spec.label);
-                            let binding=self.draft_settings.bindings.entry(spec.id.into()).or_insert_with(||spec.key.into());
-                            ui.text_edit_singleline(binding);
+            egui::Window::new("Settings")
+                .open(&mut open)
+                .default_width(650.0)
+                .default_height(560.0)
+                .min_height(320.0)
+                .max_height((ctx.content_rect().height() - 100.0).max(240.0))
+                .show(ctx, |ui| {
+                    theme::group(ui, |ui| {
+                        for (tab, label) in [(0, "Review"), (1, "Performance"), (2, "Shortcuts")] {
+                            if theme::tab(ui, self.settings_tab == tab, label).clicked() { self.settings_tab = tab; }
+                        }
+                    });
+                    ui.add_space(6.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt(("settings-content", self.settings_tab))
+                        .auto_shrink([false, false])
+                        .max_height((ui.available_height() - 90.0).clamp(80.0, 500.0))
+                        .show(ui, |ui| {
+                            match self.settings_tab {
+                                0 => {
+                                    ui.checkbox(&mut self.draft_settings.link_raw, "Link JPEG selections to matching RAW files");
+                                    ui.label(egui::RichText::new("Independent RAW choices return when linking is turned off.").small().color(theme::MUTED));
+                                    ui.checkbox(&mut self.draft_settings.include_videos, "Include videos in import");
+                                    ui.checkbox(&mut self.draft_settings.auto_advance, "Advance after deciding candidate B");
+                                    ui.add_space(8.0);
+                                    ui.separator();
+                                    ui.checkbox(&mut self.draft_settings.group_bursts, "Group similar captures into bursts");
+                                    ui.add(egui::Slider::new(&mut self.draft_settings.burst_window_ms, 100..=10000).text("Burst interval (ms)"));
+                                    ui.add(egui::Slider::new(&mut self.draft_settings.burst_distance, 0..=32).text("Similarity distance"));
+                                    if let Some(session) = &self.session {
+                                        ui.label(egui::RichText::new(format!("{} assets selected for import with these settings", session.selected_ids(&self.draft_settings).len())).small().color(theme::MUTED));
+                                    }
+                                }
+                                1 => {
+                                    ui.label(egui::RichText::new("Preview memory and camera staging").strong());
+                                    ui.label(egui::RichText::new("Larger caches keep more nearby images ready for inspection.").small().color(theme::MUTED));
+                                    ui.add_space(8.0);
+                                    ui.add(egui::Slider::new(&mut self.draft_settings.cpu_cache_mib, 256..=16384).text("CPU cache (MiB)"));
+                                    ui.add(egui::Slider::new(&mut self.draft_settings.gpu_cache_mib, 128..=2048).text("GPU cache (MiB)"));
+                                    ui.add(egui::Slider::new(&mut self.draft_settings.disk_cache_gib, 1..=128).text("Staging quota (GiB)"));
+                                    ui.label(egui::RichText::new("Staged JPEG originals stay on disk for the next review.
+Older inactive caches can be evicted to make room.").small().color(theme::MUTED));
+                                }
+                                _ => {
+                                    ui.label(egui::RichText::new("Edit a binding, then save. Conflicts are highlighted below.").small().color(theme::MUTED));
+                                    egui::Grid::new("shortcut-settings").num_columns(2).spacing(egui::vec2(16.0, 8.0)).striped(true).show(ui, |ui| {
+                                        for spec in COMMANDS {
+                                            ui.label(spec.label);
+                                            let binding = self.draft_settings.bindings.entry(spec.id.into()).or_insert_with(|| spec.key.into());
+                                            ui.add(egui::TextEdit::singleline(binding).desired_width(180.0));
+                                            ui.end_row();
+                                        }
+                                    });
+                                }
+                            }
                         });
-                    }
+                    ui.separator();
+                    let validation = review_commands::validate(&self.draft_settings.bindings);
+                    if let Err(error) = &validation { ui.colored_label(theme::REJECT, error); }
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(validation.is_ok(), egui::Button::new(egui::RichText::new("Save changes").color(theme::BACKGROUND).strong()).fill(theme::ACCENT)).clicked() {
+                            self.settings = self.draft_settings.clone();
+                            self.save();
+                            self.refresh_visible();
+                            self.settings_open = false;
+                            self.burst_groups.clear();
+                        }
+                        if ui.button("Cancel").clicked() { self.settings_open = false; }
+                    });
                 });
-                if let Err(error)=review_commands::validate(&self.draft_settings.bindings){ui.colored_label(egui::Color32::LIGHT_RED,error);}
-                if ui.button("Save").clicked() && review_commands::validate(&self.draft_settings.bindings).is_ok() {
-                    self.settings=self.draft_settings.clone();self.save();self.refresh_visible();self.settings_open=false;
-                    self.burst_groups.clear();
-                }
-            });
             if !open {
                 self.settings_open = false;
             }
@@ -1550,99 +1924,81 @@ impl eframe::App for App {
             .map(|(key, _)| key.clone())
             .collect();
         self.cache.poll(&pins);
-        egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
-        egui::Panel::bottom("status").show(ui, |ui| {
-            if let Some(import) = &self.import {
-                ui.add(egui::ProgressBar::new(import.progress).text(&import.text));
-                if ui.button("Cancel import").clicked() {
-                    self.command(Command::Cancel);
-                }
-            }
-            if self.camera_busy || self.loader.is_some() {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Working…");
+        egui::Panel::top("toolbar")
+            .frame(theme::panel())
+            .show(ui, |ui| self.toolbar(ui));
+        egui::Panel::bottom("status")
+            .frame(theme::panel().inner_margin(egui::Margin::symmetric(14, 4)))
+            .show(ui, |ui| self.status_bar(ui));
+        if self.session.is_some() {
+            egui::Panel::bottom("filmstrip")
+                .exact_size(171.0)
+                .frame(theme::panel())
+                .show(ui, |ui| {
+                    self.filters(ui);
+                    ui.add_space(3.0);
+                    self.filmstrip(ui);
                 });
-            }
-            if self.camera_busy {
-                ui.add(egui::ProgressBar::new(self.camera_progress));
-                if ui.button("Cancel operation").clicked() {
-                    self.command(Command::Cancel);
-                }
-            }
-            if !self.staging_text.is_empty() {
-                ui.label(&self.staging_text);
-                if self.staging_active && !self.camera_busy {
-                    ui.add(egui::ProgressBar::new(self.camera_progress).desired_height(3.0));
-                }
-            }
-            if let Some(session) = &self.session {
-                match &session.source {
-                    Source::Local { root, raw } => {
-                        ui.small(format!(
-                            "Source: {}{}",
-                            root.display(),
-                            raw.as_ref()
-                                .map(|p| format!(" · RAW {}", p.display()))
-                                .unwrap_or_default()
-                        ));
-                    }
-                    Source::Mtp { device, folder } => {
-                        let name = self
-                            .devices
+        }
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(theme::BACKGROUND).inner_margin(8))
+            .show(ui, |ui| {
+                if self.session.is_none() {
+                    ui.add_space((ui.available_height() * 0.42 - 90.0).max(20.0));
+                    ui.vertical_centered(|ui| {
+                        ui.heading("Review your photos");
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "Find the keepers. Compare the details. Import your favourites.",
+                            )
+                            .color(theme::MUTED),
+                        );
+                        ui.add_space(20.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(280.0, 32.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                self.command_button(ui, "Connect camera", Command::Camera);
+                                self.command_button(ui, "Open a folder", Command::Open);
+                            },
+                        );
+                        ui.add_space(14.0);
+                        ui.label(
+                            egui::RichText::new(
+                                "JPEG + RAW linked · Videos included · Originals stay safe",
+                            )
+                            .small()
+                            .color(theme::MUTED),
+                        );
+                    });
+                } else if self.visible.is_empty() {
+                    ui.centered_and_justified(|ui| {
+                        ui.label("No images match the current filters.");
+                    });
+                } else {
+                    let a = self.pinned.map(|index| self.view_image(index, edge));
+                    let b = self.view_image(self.selected, edge);
+                    let blink = !ctx.egui_wants_keyboard_input()
+                        && !self.settings_open
+                        && !self.import_open
+                        && !self.camera_picker
+                        && !self.palette_open
+                        && COMMANDS
                             .iter()
-                            .find(|d| d.id == *device)
-                            .map_or("Camera", |d| d.name.as_str());
-                        let path = self
-                            .folders
-                            .iter()
-                            .find(|f| f.id == *folder)
-                            .map_or("Selected folder", |f| f.path.as_str());
-                        ui.small(format!("Source: {name} · {path}"));
-                    }
+                            .find(|s| s.command == Command::Blink)
+                            .and_then(|s| self.shortcut(s))
+                            .is_some_and(|s| {
+                                ctx.input(|i| {
+                                    i.key_down(s.logical_key)
+                                        && i.modifiers.matches_exact(s.modifiers)
+                                })
+                            });
+                    #[cfg(feature = "ui-smoke")]
+                    let blink = blink || self.smoke.as_ref().is_some_and(|s| s.blink);
+                    self.canvas.show(ui, &mut self.cache, a, b, blink);
                 }
-            }
-            if let Some(error) = self.error.clone() {
-                ui.horizontal(|ui| {
-                    ui.colored_label(egui::Color32::LIGHT_RED, error);
-                    if ui.small_button("Dismiss").clicked() {
-                        self.error = None;
-                    }
-                });
-            }
-            if let Some(message) = &self.message {
-                ui.label(message);
-            }
-            ui.small(format!(
-                "{} visible · CPU {:.0} MiB · GPU {:.0} MiB · UI {:.1} ms · mean decode {:.1} ms",
-                self.visible.len(),
-                self.cache.bytes() as f64 / 1048576.0,
-                self.canvas.bytes() as f64 / 1048576.0,
-                self.frame_ms,
-                self.cache.stats.decode_ms / self.cache.stats.decodes.max(1) as f64
-            ));
-        });
-        egui::Panel::bottom("filmstrip")
-            .exact_size(125.0)
-            .show(ui, |ui| self.filmstrip(ui));
-        egui::CentralPanel::default().show(ui,|ui|{
-            if self.session.is_none(){
-                ui.centered_and_justified(|ui|{ui.vertical_centered(|ui|{
-                    ui.heading("Review on the big screen");
-                    ui.label("Open a JPEG folder or connect the camera. Select the keepers, then import originals.");
-                    ui.label("JPEG + RAW linked by default · Videos included by default");
-                });});
-            }else if self.visible.is_empty(){ui.centered_and_justified(|ui|{ui.label("No images match the current filters.");});}
-            else{
-                let a=self.pinned.map(|index|self.view_image(index,edge));
-                let b=self.view_image(self.selected,edge);
-                let blink=!ctx.egui_wants_keyboard_input() && !self.settings_open && !self.import_open && !self.camera_picker && !self.palette_open &&
-                    COMMANDS.iter().find(|s|s.command==Command::Blink).and_then(|s|self.shortcut(s)).is_some_and(|s|ctx.input(|i|i.key_down(s.logical_key) && i.modifiers.matches_exact(s.modifiers)));
-                #[cfg(feature="ui-smoke")]
-                let blink=blink || self.smoke.as_ref().is_some_and(|s|s.blink);
-                self.canvas.show(ui,&mut self.cache,a,b,blink);
-            }
-        });
+            });
         self.dialogs(&ctx);
         if let Some(session) = &self.session {
             let native = self.canvas.native();
@@ -1703,9 +2059,9 @@ impl Drop for App {
 }
 fn decision_color(decision: Decision) -> egui::Color32 {
     match decision {
-        Decision::Keep => egui::Color32::from_rgb(80, 210, 140),
-        Decision::Reject => egui::Color32::from_rgb(230, 100, 100),
-        Decision::Unreviewed => egui::Color32::from_rgb(190, 180, 130),
+        Decision::Keep => theme::ACCENT,
+        Decision::Reject => theme::REJECT,
+        Decision::Unreviewed => theme::MUTED,
     }
 }
 fn optional_path(value: &str) -> Option<PathBuf> {
