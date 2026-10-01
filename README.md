@@ -98,7 +98,8 @@ Settings > Performance offers **Smooth (mipmaps)**, **Linear** and **Nearest
 neighbor** image sampling. Smooth is the default and reduces zoomed-out moiré with
 a GPU-generated low-pass pyramid and interpolation between levels. It uses about
 one-third more image texture memory, counted in the canvas cache budget. Linear
-keeps the previous sampling; nearest neighbor shows pixels without interpolation.
+blends neighboring pixels using less memory, but can show moiré when zoomed out;
+nearest neighbor shows pixels without interpolation.
 Full-resolution focus analysis remains independent of display sampling.
 
 The welcome screen suggests the five most recently opened sources; **Recent** in

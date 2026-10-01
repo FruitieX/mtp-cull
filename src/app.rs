@@ -1941,7 +1941,7 @@ impl App {
                                                 ui.selectable_value(&mut self.draft_settings.sampling, sampling, sampling.label());
                                             }
                                         });
-                                    ui.label(egui::RichText::new("Smooth uses mipmaps to reduce moiré when zoomed out (about 33% extra image texture memory). Linear is the previous mode; nearest neighbor shows individual pixels.").small().color(theme::MUTED));
+                                    ui.label(egui::RichText::new("Smooth uses mipmaps to reduce moiré when zoomed out (about 33% extra image texture memory). Linear blends neighboring pixels using less memory, but can show moiré when zoomed out. Nearest neighbor shows pixels without interpolation.").small().color(theme::MUTED));
                                 }
                                 _ => {
                                     ui.label(egui::RichText::new("Edit a binding, then save. Conflicts are highlighted below.").small().color(theme::MUTED));
