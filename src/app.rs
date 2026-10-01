@@ -56,6 +56,9 @@ pub fn init(args: &crate::cli::UiArgs) -> Result<()> {
         Box::new(|cc| {
             theme::install(&cc.egui_ctx);
             let mut app = App::new()?;
+            if let Some(state) = &cc.wgpu_render_state {
+                app.canvas.set_gpu(state.clone());
+            }
             if let Some((root, raw)) = initial {
                 let (sender, receiver) = mpsc::channel();
                 app.loader = Some(receiver);
@@ -70,6 +73,9 @@ pub fn init(args: &crate::cli::UiArgs) -> Result<()> {
     Ok(())
 }
 
+#[path = "filmstrip.rs"]
+mod filmstrip;
+
 struct App {
     #[cfg(feature = "ui-smoke")]
     smoke: Option<smoke::Smoke>,
@@ -81,6 +87,17 @@ struct App {
     cache: ImageCache,
     canvas: Canvas,
     selected: usize,
+    reel_selection: crate::reel::Selection,
+    reel_follow: bool,
+    reel_viewport: egui::Rect,
+    reel_clip: egui::Rect,
+    reel_layout: Option<(usize, egui::Vec2)>,
+    #[cfg(feature = "ui-smoke")]
+    reel_cells: Vec<(usize, egui::Rect)>,
+    #[cfg(feature = "ui-smoke")]
+    reel_menu_items: Vec<(Command, egui::Rect)>,
+    #[cfg(feature = "ui-smoke")]
+    reel_panel_bounds: egui::Rect,
     pinned: Option<usize>,
     media_filter: Option<Kind>,
     decision_filter: Option<Decision>,
@@ -129,10 +146,11 @@ struct App {
 }
 impl App {
     fn new() -> Result<Self> {
-        let store = Store::open()?;
+        Self::with_store(Store::open()?, import_presets::config_path()?)
+    }
+    fn with_store(store: Store, presets_path: PathBuf) -> Result<Self> {
         let settings = store.settings()?;
         let cache = ImageCache::new(settings.cpu_cache_mib * 1024 * 1024);
-        let presets_path = import_presets::config_path()?;
         let (presets, preset_error) = match import_presets::load(&presets_path) {
             Ok(presets) => (presets, None),
             Err(error) => (Vec::new(), Some(format!("{error:#}"))),
@@ -148,6 +166,17 @@ impl App {
             cache,
             canvas: Canvas::default(),
             selected: 0,
+            reel_selection: crate::reel::Selection::default(),
+            reel_follow: true,
+            reel_viewport: egui::Rect::NOTHING,
+            reel_clip: egui::Rect::NOTHING,
+            reel_layout: None,
+            #[cfg(feature = "ui-smoke")]
+            reel_cells: Vec::new(),
+            #[cfg(feature = "ui-smoke")]
+            reel_menu_items: Vec::new(),
+            #[cfg(feature = "ui-smoke")]
+            reel_panel_bounds: egui::Rect::NOTHING,
             pinned: None,
             media_filter: Some(Kind::Jpeg),
             decision_filter: None,
@@ -257,6 +286,8 @@ impl App {
         self.remember_source(&session.source);
         self.session = Some(session);
         self.selected = 0;
+        self.reel_selection = crate::reel::Selection::default();
+        self.reel_follow = true;
         self.pinned = None;
         self.history = History::default();
         self.cache.clear();
@@ -311,6 +342,7 @@ impl App {
         self.message = (!reconciliation.is_empty()).then_some(reconciliation);
     }
     fn refresh_visible(&mut self) {
+        let previous = self.selected;
         self.visible = self
             .session
             .as_ref()
@@ -337,6 +369,14 @@ impl App {
         {
             self.selected = first;
         }
+        self.reel_selection.retain_visible(&self.visible);
+        if self.visible.contains(&self.selected)
+            && (self.selected != previous
+                || (self.reel_selection.indices.is_empty() && self.reel_follow))
+        {
+            self.reel_selection.single(self.selected);
+        }
+        self.reel_follow = true;
     }
     fn navigate(&mut self, direction: isize) {
         self.last_direction = direction;
@@ -345,12 +385,19 @@ impl App {
                 .saturating_add_signed(direction)
                 .min(self.visible.len().saturating_sub(1));
             self.selected = self.visible[next];
+            self.reel_selection.single(self.selected);
+            self.reel_follow = true;
             self.canvas.active_a = false;
         }
     }
     fn decide(&mut self, decision: Decision, bulk: bool) {
+        if self.visible.is_empty() {
+            return;
+        }
         let indices = if bulk {
             self.visible.clone()
+        } else if !self.canvas.active_a && !self.reel_selection.indices.is_empty() {
+            self.reel_selection.indices.iter().copied().collect()
         } else {
             vec![if self.canvas.active_a {
                 self.pinned.unwrap_or(self.selected)
@@ -368,7 +415,7 @@ impl App {
             );
         }
         self.save();
-        if self.settings.auto_advance && !bulk && !self.canvas.active_a {
+        if self.settings.auto_advance && indices.len() == 1 && !bulk && !self.canvas.active_a {
             self.navigate(1);
         }
         self.refresh_visible();
@@ -473,6 +520,7 @@ impl App {
                 self.canvas.reset();
                 self.thumbnails.clear();
                 self.visible.clear();
+                self.reel_selection = crate::reel::Selection::default();
                 self.staging_text.clear();
                 self.staging_active = false;
                 self.staging_request = None;
@@ -545,6 +593,8 @@ impl App {
                         })
                 {
                     self.selected = index;
+                    self.reel_selection.single(index);
+                    self.reel_follow = true;
                 }
             }
             Command::Reject => self.decide(Decision::Reject, false),
@@ -611,6 +661,8 @@ impl App {
                 }
                 if let Some(a) = self.pinned.replace(self.selected) {
                     self.selected = a;
+                    self.reel_selection.single(a);
+                    self.reel_follow = true;
                     self.canvas.active_a = !self.canvas.active_a;
                 }
             }
@@ -659,6 +711,24 @@ impl App {
             }
             Command::BulkKeep => self.decide(Decision::Keep, true),
             Command::BulkReject => self.decide(Decision::Reject, true),
+            Command::SelectAll => {
+                self.reel_selection.indices = self.visible.iter().copied().collect();
+                self.canvas.active_a = false;
+            }
+            Command::DeselectAll => self.reel_selection = crate::reel::Selection::default(),
+            Command::ToggleReelSelection => {
+                if self.visible.contains(&self.selected) {
+                    self.reel_selection
+                        .click(self.selected, &self.visible, true, false);
+                    self.canvas.active_a = false;
+                }
+            }
+            Command::ReelMode => {
+                self.settings.reel_grid = !self.settings.reel_grid;
+                self.draft_settings.reel_grid = self.settings.reel_grid;
+                self.reel_follow = true;
+                self.store.save_settings(&self.settings);
+            }
             Command::Import => {
                 if self.import.is_none() && !self.camera_busy && self.loader.is_none() {
                     self.import_open = true;
@@ -1340,8 +1410,12 @@ impl App {
         }
     }
     fn command_button(&mut self, ui: &mut egui::Ui, label: &str, command: Command) {
-        if ui
-            .button(label)
+        let response = if let Some(icon) = theme::command_icon(command) {
+            theme::icon_button(ui, label, icon)
+        } else {
+            ui.button(label)
+        };
+        if response
             .on_hover_text(self.button_text(label, command))
             .clicked()
         {
@@ -1446,20 +1520,29 @@ impl App {
                                     .map_or(s.key, String::as_str)
                             })
                             .unwrap_or_default();
-                        if ui
+                        let response = ui
                             .add(
-                                egui::Button::new(egui::RichText::new(label).color(color).strong())
-                                    .fill(fill)
-                                    .stroke(egui::Stroke::NONE)
-                                    .shortcut_text(binding),
+                                egui::Button::new(
+                                    egui::RichText::new(format!("     {label}"))
+                                        .color(color)
+                                        .strong(),
+                                )
+                                .fill(fill)
+                                .stroke(egui::Stroke::NONE)
+                                .shortcut_text(binding),
                             )
-                            .on_hover_text(self.button_text(label, command))
-                            .clicked()
-                        {
+                            .on_hover_text(self.button_text(label, command));
+                        theme::button_icon(
+                            ui,
+                            &response,
+                            theme::command_icon(command).unwrap(),
+                            color,
+                        );
+                        if response.clicked() {
                             self.command(command);
                         }
                     }
-                    self.command_button(ui, "Clear", Command::Clear);
+                    self.command_button(ui, "Unreviewed", Command::Clear);
                     self.command_button(ui, "Undo", Command::Undo);
                 });
                 theme::group(ui, |ui| {
@@ -1474,12 +1557,22 @@ impl App {
                         (Mode::SideBySide, "Side by side"),
                         (Mode::Wipe, "Wipe"),
                     ] {
-                        if theme::tab(ui, self.canvas.mode == mode, label)
-                            .on_hover_text(
-                                self.button_text("Cycle comparison mode", Command::Compare),
-                            )
-                            .clicked()
-                        {
+                        let response =
+                            theme::tab(ui, self.canvas.mode == mode, &format!("     {label}"))
+                                .on_hover_text(
+                                    self.button_text("Cycle comparison mode", Command::Compare),
+                                );
+                        theme::button_icon(
+                            ui,
+                            &response,
+                            match mode {
+                                Mode::Single => theme::Icon::Single,
+                                Mode::SideBySide => theme::Icon::Compare,
+                                Mode::Wipe => theme::Icon::Wipe,
+                            },
+                            theme::TEXT,
+                        );
+                        if response.clicked() {
                             if mode != Mode::Single && self.pinned.is_none() {
                                 self.command(Command::Pin);
                             }
@@ -1571,6 +1664,36 @@ impl App {
                 self.refresh_visible();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if theme::icon_button(
+                    ui,
+                    if self.settings.reel_grid {
+                        "Row"
+                    } else {
+                        "Grid"
+                    },
+                    if self.settings.reel_grid {
+                        theme::Icon::Row
+                    } else {
+                        theme::Icon::Grid
+                    },
+                )
+                .on_hover_text(self.button_text(
+                    "Switch between horizontal reel and vertical grid",
+                    Command::ReelMode,
+                ))
+                .clicked()
+                {
+                    self.command(Command::ReelMode);
+                }
+                if self.reel_selection.indices.len() > 1 {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{} selected",
+                            self.reel_selection.indices.len()
+                        ))
+                        .color(theme::SELECTED),
+                    );
+                }
                 let position = self
                     .visible
                     .iter()
@@ -1733,169 +1856,6 @@ impl App {
             });
         });
     }
-    fn filmstrip(&mut self, ui: &mut egui::Ui) {
-        let mut pins = HashSet::new();
-        let visible = self.visible.clone();
-        let Some(session) = &self.session else {
-            return;
-        };
-        egui::ScrollArea::horizontal()
-            .id_salt("filmstrip")
-            .show_viewport(ui, |ui, viewport| {
-                let width = 124.0;
-                let total = visible.len() as f32 * width;
-                ui.set_min_size(egui::vec2(total, 119.0));
-                let first = (viewport.min.x / width).floor().max(0.0) as usize;
-                let end = ((viewport.max.x / width).ceil() as usize + 1).min(visible.len());
-                let origin = ui.min_rect().min;
-                let mut chosen = None;
-                for (position, &index) in visible.iter().enumerate().take(end).skip(first) {
-                    let shot = &session.shots[index];
-                    let rect = egui::Rect::from_min_size(
-                        origin + egui::vec2(position as f32 * width, 0.0),
-                        egui::vec2(width - 8.0, 115.0),
-                    );
-                    let response =
-                        ui.interact(rect, ui.id().with(("shot", index)), egui::Sense::click());
-                    if response.clicked() {
-                        chosen = Some(index);
-                    }
-                    let color = decision_color(
-                        shot.decision(shot.review_kind(self.media_filter), self.settings.link_raw),
-                    );
-                    ui.painter().rect_filled(
-                        rect,
-                        4.0,
-                        if index == self.selected {
-                            theme::ACCENT_BG
-                        } else {
-                            theme::SURFACE
-                        },
-                    );
-                    ui.painter().rect_stroke(
-                        rect,
-                        4.0,
-                        egui::Stroke::new(
-                            if index == self.selected {
-                                3.0
-                            } else if response.hovered() {
-                                2.0
-                            } else {
-                                1.5
-                            },
-                            color,
-                        ),
-                        egui::StrokeKind::Inside,
-                    );
-                    if let Some(path) = shot.preview() {
-                        let key = Key::fit(path.to_owned(), 192);
-                        pins.insert(key.clone());
-                        self.thumbnail_tick += 1;
-                        self.thumbnail_ticks
-                            .insert(key.clone(), self.thumbnail_tick);
-                        self.demands.push((key.clone(), 3));
-                        if !self.thumbnails.contains_key(&key)
-                            && let Some(picture) = self.cache.get(&key)
-                        {
-                            self.thumbnails.insert(
-                                key.clone(),
-                                ui.ctx().load_texture(
-                                    format!("thumb:{}", path.display()),
-                                    picture.image.clone(),
-                                    egui::TextureOptions::LINEAR,
-                                ),
-                            );
-                        }
-                        if let Some(texture) = self.thumbnails.get(&key) {
-                            let area = egui::Rect::from_min_max(
-                                rect.min + egui::vec2(6.0, 6.0),
-                                rect.max - egui::vec2(6.0, 40.0),
-                            );
-                            let image_size = texture.size_vec2();
-                            let scale =
-                                (area.width() / image_size.x).min(area.height() / image_size.y);
-                            let image_rect =
-                                egui::Rect::from_center_size(area.center(), image_size * scale);
-                            ui.painter().image(
-                                texture.id(),
-                                image_rect,
-                                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                                egui::Color32::WHITE,
-                            );
-                        }
-                    }
-                    ui.painter().text(
-                        rect.left_bottom() + egui::vec2(8.0, -33.0),
-                        egui::Align2::LEFT_TOP,
-                        &shot.name,
-                        egui::FontId::proportional(12.0),
-                        egui::Color32::WHITE,
-                    );
-                    let detail = format!(
-                        "{}{}{}",
-                        self.burst_groups
-                            .get(&index)
-                            .map(|id| format!("B{id} · "))
-                            .unwrap_or_default(),
-                        if self.pinned == Some(index) {
-                            "A · "
-                        } else {
-                            ""
-                        },
-                        if shot.conflict() {
-                            "PAIR CONFLICT"
-                        } else {
-                            shot.decision(
-                                shot.review_kind(self.media_filter),
-                                self.settings.link_raw,
-                            )
-                            .label()
-                        }
-                    );
-                    ui.painter().text(
-                        rect.left_bottom() + egui::vec2(8.0, -5.0),
-                        egui::Align2::LEFT_BOTTOM,
-                        detail,
-                        egui::FontId::proportional(11.0),
-                        if shot.conflict() {
-                            theme::REJECT
-                        } else {
-                            color
-                        },
-                    );
-                    ui.painter().circle_filled(
-                        rect.right_bottom() + egui::vec2(-10.0, -12.0),
-                        2.5,
-                        color,
-                    );
-                    response.on_hover_text(
-                        shot.assets
-                            .iter()
-                            .map(|a| format!("{} · {} · {} bytes", a.name, a.kind.label(), a.size))
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    );
-                }
-                if let Some(index) = chosen {
-                    self.selected = index;
-                    self.canvas.active_a = false;
-                }
-            });
-        while self.thumbnails.len() > 256 {
-            let oldest = self
-                .thumbnail_ticks
-                .iter()
-                .filter(|(key, _)| !pins.contains(*key))
-                .min_by_key(|(_, tick)| *tick)
-                .map(|(key, _)| key.clone());
-            if let Some(key) = oldest {
-                self.thumbnails.remove(&key);
-                self.thumbnail_ticks.remove(&key);
-            } else {
-                break;
-            }
-        }
-    }
     fn dialogs(&mut self, ctx: &egui::Context) {
         if self.settings_open {
             let mut open = true;
@@ -1928,6 +1888,12 @@ impl App {
                                     ui.checkbox(&mut self.draft_settings.group_bursts, "Group similar captures into bursts");
                                     ui.add(egui::Slider::new(&mut self.draft_settings.burst_window_ms, 100..=10000).text("Burst interval (ms)"));
                                     ui.add(egui::Slider::new(&mut self.draft_settings.burst_distance, 0..=32).text("Similarity distance"));
+                                    ui.separator();
+                                    ui.label(egui::RichText::new("Film reel").strong());
+                                    ui.checkbox(&mut self.draft_settings.reel_grid, "Show a grid instead of one row");
+                                    ui.add(egui::Slider::new(&mut self.draft_settings.reel_thumbnail_size, 100.0..=300.0).text("Grid thumbnail width"));
+                                    ui.add(egui::Slider::new(&mut self.draft_settings.reel_scroll_speed, 0.25..=8.0).text("Reel scroll speed"));
+                                    ui.label(egui::RichText::new("Drag the reel's top edge to resize. Wheel scrolls the row left/right; Shift is optional. Ctrl-click selects a batch; Shift-click selects a range.").small().color(theme::MUTED));
                                     if let Some(session) = &self.session {
                                         ui.label(egui::RichText::new(format!("{} assets selected for import with these settings", session.selected_ids(&self.draft_settings).len())).small().color(theme::MUTED));
                                     }
@@ -1939,8 +1905,17 @@ impl App {
                                     ui.add(egui::Slider::new(&mut self.draft_settings.cpu_cache_mib, 256..=16384).text("CPU cache (MiB)"));
                                     ui.add(egui::Slider::new(&mut self.draft_settings.gpu_cache_mib, 128..=2048).text("GPU cache (MiB)"));
                                     ui.add(egui::Slider::new(&mut self.draft_settings.disk_cache_gib, 1..=128).text("Staging quota (GiB)"));
-                                    ui.label(egui::RichText::new("Staged JPEG originals stay on disk for the next review.
-Older inactive caches can be evicted to make room.").small().color(theme::MUTED));
+                                    ui.label(egui::RichText::new("Staged JPEG originals stay on disk for the next review. Older inactive caches can be evicted to make room.").small().color(theme::MUTED));
+                                    ui.separator();
+                                    ui.label(egui::RichText::new("Image sampling").strong());
+                                    egui::ComboBox::from_id_salt("preview-sampling")
+                                        .selected_text(self.draft_settings.sampling.label())
+                                        .show_ui(ui, |ui| {
+                                            for sampling in [crate::viewer::Sampling::Smooth, crate::viewer::Sampling::Linear, crate::viewer::Sampling::Nearest] {
+                                                ui.selectable_value(&mut self.draft_settings.sampling, sampling, sampling.label());
+                                            }
+                                        });
+                                    ui.label(egui::RichText::new("Smooth uses mipmaps to reduce moiré when zoomed out (about 33% extra image texture memory). Linear is the previous mode; nearest neighbor shows individual pixels.").small().color(theme::MUTED));
                                 }
                                 _ => {
                                     ui.label(egui::RichText::new("Edit a binding, then save. Conflicts are highlighted below.").small().color(theme::MUTED));
@@ -1978,6 +1953,8 @@ Older inactive caches can be evicted to make room.").small().color(theme::MUTED)
             egui::Window::new("Keyboard and comparison help").open(&mut open).show(ctx,|ui|{
                 ui.label("Wheel: zoom at cursor · Drag: shared pan · Alt+drag B: manual alignment");
                 ui.label("Pin A, browse B; Tab selects which pane receives Keep/Reject.");
+                ui.label("Ctrl-click reel thumbnails for a batch; Shift-click for a range. Ctrl+A selects visible images. Keep/Reject/Unreviewed apply to the batch, or to pinned A when A is active.");
+                ui.label("Drag the reel's top edge to resize; Ctrl+G switches row/grid. Wheel scrolls the reel without Shift. Scroll speed is in Settings > Review; sampling is in Settings > Performance.");
                 ui.label("Region mode: drag a crop. Focus scores are hints, not automatic decisions.");
                 egui::ScrollArea::vertical().max_height(500.0).show(ui,|ui|{
                     for spec in COMMANDS{ui.horizontal(|ui|{ui.monospace(self.settings.bindings.get(spec.id).map_or(spec.key,String::as_str));ui.label(spec.label);});}
@@ -2258,7 +2235,16 @@ Older inactive caches can be evicted to make room.").small().color(theme::MUTED)
     }
 }
 impl eframe::App for App {
+    #[cfg(feature = "ui-smoke")]
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if let Some(smoke) = &mut self.smoke
+            && smoke.input_ready()
+        {
+            raw.events.append(&mut smoke.input);
+        }
+    }
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.canvas.begin_frame();
         let start = Instant::now();
         let ctx = ui.ctx().clone();
         self.poll();
@@ -2268,6 +2254,7 @@ impl eframe::App for App {
             .set_budget(self.settings.cpu_cache_mib * 1024 * 1024);
         self.canvas
             .set_budget(self.settings.gpu_cache_mib * 1024 * 1024);
+        self.canvas.set_sampling(self.settings.sampling);
         let edge = (ctx.content_rect().height() * ctx.pixels_per_point())
             .ceil()
             .clamp(800.0, 4320.0) as u32;
@@ -2288,14 +2275,31 @@ impl eframe::App for App {
             .frame(theme::panel().inner_margin(egui::Margin::symmetric(14, 4)))
             .show(ui, |ui| self.status_bar(ui));
         if self.session.is_some() {
-            egui::Panel::bottom("filmstrip")
-                .exact_size(171.0)
+            let reel_panel = egui::Panel::bottom("filmstrip")
+                .resizable(true)
+                .default_size(self.settings.reel_height)
+                .size_range(155.0..=(ctx.content_rect().height() * 0.6).max(155.0))
                 .frame(theme::panel())
                 .show(ui, |ui| {
+                    ui.add_space(3.0);
                     self.filters(ui);
                     ui.add_space(3.0);
                     self.filmstrip(ui);
                 });
+            self.settings.reel_height = reel_panel.response.rect.height();
+            let grip = reel_panel.response.rect.center_top() + egui::vec2(0.0, 1.5);
+            ui.painter().line_segment(
+                [grip - egui::vec2(15.0, 0.0), grip + egui::vec2(15.0, 0.0)],
+                egui::Stroke::new(2.0, theme::MUTED),
+            );
+            #[cfg(feature = "ui-smoke")]
+            {
+                self.reel_panel_bounds = reel_panel.response.rect;
+            }
+            self.draft_settings.reel_height = self.settings.reel_height;
+            if ctx.input(|i| i.pointer.any_released()) {
+                self.store.save_settings(&self.settings);
+            }
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(theme::BACKGROUND).inner_margin(8))
@@ -2399,6 +2403,9 @@ impl eframe::App for App {
                     #[cfg(feature = "ui-smoke")]
                     let blink = blink || self.smoke.as_ref().is_some_and(|s| s.blink);
                     self.canvas.show(ui, &mut self.cache, a, b, blink);
+                    if let Some(command) = self.canvas.context_command.take() {
+                        self.command(command);
+                    }
                 }
             });
         self.dialogs(&ctx);
@@ -2482,4 +2489,150 @@ fn folder_field(ui: &mut egui::Ui, label: &str, value: &mut String) {
             *value = path.display().to_string();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn fixture_app(root: &std::path::Path) -> App {
+        let photos = root.join("photos");
+        std::fs::create_dir_all(&photos).unwrap();
+        for name in [
+            "A.JPG", "A.RAF", "B.JPG", "B.RAF", "C.JPG", "C.RAF", "V.MP4",
+        ] {
+            std::fs::write(photos.join(name), b"metadata-only fixture").unwrap();
+        }
+        let mut app = App::with_store(
+            Store::at(root.join("test.sqlite3")).unwrap(),
+            root.join("presets.json"),
+        )
+        .unwrap();
+        app.install(review::scan_local(photos, None).unwrap());
+        app
+    }
+    #[test]
+    fn empty_filters_never_leave_hidden_edit_targets_or_change_their_decisions() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = fixture_app(root.path());
+        app.command(Command::SelectAll);
+        app.command(Command::FilterKeep);
+        assert!(app.visible.is_empty());
+        assert!(app.reel_selection.indices.is_empty());
+        app.command(Command::Keep);
+        app.command(Command::SelectAll);
+        app.command(Command::Reject);
+        assert!(app.reel_selection.indices.is_empty());
+        let session = app.session.as_ref().unwrap();
+        assert!(
+            session.shots[..3]
+                .iter()
+                .all(|s| s.decision(Kind::Jpeg, true) == Decision::Unreviewed)
+        );
+        assert_eq!(session.selected_ids(&app.settings).len(), 1);
+    }
+    #[test]
+    fn ctrl_a_selects_without_deciding_and_batch_decisions_link_raw_and_undo_together() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = fixture_app(root.path());
+        app.settings.auto_advance = true;
+        let selected = app.selected;
+        app.command(Command::SelectAll);
+        assert_eq!(app.reel_selection.indices.len(), 3);
+        assert_eq!(
+            app.session
+                .as_ref()
+                .unwrap()
+                .selected_ids(&app.settings)
+                .len(),
+            1
+        );
+        app.command(Command::Keep);
+        assert_eq!(
+            app.session
+                .as_ref()
+                .unwrap()
+                .selected_ids(&app.settings)
+                .len(),
+            7
+        );
+        assert_eq!(app.selected, selected, "batch decisions must not advance");
+        app.command(Command::Undo);
+        assert_eq!(
+            app.session
+                .as_ref()
+                .unwrap()
+                .selected_ids(&app.settings)
+                .len(),
+            1
+        );
+        app.command(Command::Redo);
+        app.command(Command::Reject);
+        assert_eq!(
+            app.session
+                .as_ref()
+                .unwrap()
+                .selected_ids(&app.settings)
+                .len(),
+            1
+        );
+        app.command(Command::Clear);
+        assert!(app.visible.iter().all(|i| {
+            app.session.as_ref().unwrap().shots[*i].decision(Kind::Jpeg, true)
+                == Decision::Unreviewed
+        }));
+        app.command(Command::Next);
+        assert_eq!(app.reel_selection.indices.len(), 1);
+        app.command(Command::Keep);
+        assert_eq!(app.selected, 2, "single decisions may advance");
+        app.media_filter = Some(Kind::Video);
+        app.refresh_visible();
+        assert!(
+            !app.reel_selection.indices.iter().any(|i| *i < 3),
+            "hidden photos cannot remain batch targets"
+        );
+    }
+    #[test]
+    fn active_a_decisions_do_not_modify_a_batch_and_ctrl_click_removes_members() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = fixture_app(root.path());
+        app.reel_selection.click(1, &app.visible, true, false);
+        app.selected = 1;
+        app.command(Command::Keep);
+        assert_eq!(
+            app.session
+                .as_ref()
+                .unwrap()
+                .selected_ids(&app.settings)
+                .len(),
+            5
+        );
+        app.reel_selection.click(0, &app.visible, true, false);
+        assert_eq!(
+            app.reel_selection
+                .indices
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [1]
+        );
+        app.pinned = Some(2);
+        app.canvas.active_a = true;
+        app.command(Command::Reject);
+        let session = app.session.as_ref().unwrap();
+        assert_eq!(session.shots[1].decision(Kind::Jpeg, true), Decision::Keep);
+        assert_eq!(
+            session.shots[2].decision(Kind::Jpeg, true),
+            Decision::Reject
+        );
+        app.command(Command::FilterReject);
+        assert_eq!(app.visible, [2]);
+        assert_eq!(
+            app.reel_selection
+                .indices
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            [2]
+        );
+    }
 }

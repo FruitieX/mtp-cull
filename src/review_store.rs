@@ -53,7 +53,7 @@ impl Store {
         std::fs::create_dir_all(dirs.data_local_dir())?;
         Self::at(dirs.data_local_dir().join("cull.sqlite3"))
     }
-    fn at(path: PathBuf) -> Result<Self> {
+    pub(crate) fn at(path: PathBuf) -> Result<Self> {
         let connection = connect(&path).wrap_err("could not open review database")?;
         let (sender, receiver) = mpsc::channel();
         let (errors_sender, errors) = mpsc::channel();
@@ -88,6 +88,16 @@ impl Store {
                 r.get(0)
             })
             .optional()?;
+        let legacy_defaults = json.as_ref().is_some_and(|j| {
+            serde_json::from_str::<serde_json::Value>(j)
+                .ok()
+                .is_some_and(|v| {
+                    v.get("shortcut_defaults_version")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                        < 1
+                })
+        });
         let mut settings: Settings = json
             .map(|j| serde_json::from_str(&j))
             .transpose()?
@@ -102,6 +112,23 @@ impl Store {
         {
             let key = settings.bindings.remove("filter_all").unwrap();
             settings.bindings.insert("decision_filter_all".into(), key);
+        }
+        if legacy_defaults {
+            // Migrate only the old default pair; retain deliberately customized keys.
+            let keep = settings.bindings.get("keep").map_or("2", String::as_str);
+            let reject = settings.bindings.get("reject").map_or("1", String::as_str);
+            if keep == "2" && reject == "1" {
+                settings.bindings.remove("keep");
+                settings.bindings.remove("reject");
+            }
+            if settings
+                .bindings
+                .get("bulk_keep")
+                .is_some_and(|k| k == "Ctrl+A")
+            {
+                settings.bindings.remove("bulk_keep");
+            }
+            settings.shortcut_defaults_version = 1;
         }
         Ok(settings)
     }
@@ -156,6 +183,56 @@ impl Drop for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn old_default_decision_and_bulk_keys_migrate_but_custom_keys_survive() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("review.sqlite3");
+        let connection = connect(&path).unwrap();
+        for (bindings, expected_keep, expected_reject) in [
+            (
+                r#"{"keep":"2","reject":"1","bulk_keep":"Ctrl+A"}"#,
+                "1",
+                "2",
+            ),
+            (
+                r#"{"keep":"3","reject":"4","bulk_keep":"Ctrl+Shift+L"}"#,
+                "3",
+                "4",
+            ),
+            (r#"{"keep":"1","reject":"2"}"#, "1", "2"),
+        ] {
+            let json = format!("{{\"bindings\":{bindings}}}");
+            connection
+                .execute(
+                    "INSERT OR REPLACE INTO review_settings(id,json) VALUES(1,?1)",
+                    [json],
+                )
+                .unwrap();
+            let store = Store::at(path.clone()).unwrap();
+            let settings = store.settings().unwrap();
+            let key = |id: &str| {
+                settings
+                    .bindings
+                    .get(id)
+                    .map(String::as_str)
+                    .unwrap_or_else(|| {
+                        crate::review_commands::COMMANDS
+                            .iter()
+                            .find(|s| s.id == id)
+                            .unwrap()
+                            .key
+                    })
+            };
+            assert_eq!(key("keep"), expected_keep);
+            assert_eq!(key("reject"), expected_reject);
+            assert_eq!(key("select_all"), "Ctrl+A");
+            assert_ne!(key("bulk_keep"), "Ctrl+A");
+            assert_eq!(settings.shortcut_defaults_version, 1);
+            crate::review_commands::validate(&settings.bindings).unwrap();
+            // Saving the new defaults allows future deliberate reverse bindings.
+            store.save_settings(&settings);
+        }
+    }
     #[test]
     fn recent_sources_survive_restart_and_older_settings_default_to_empty_history() {
         use crate::recent_sources::RecentSource;

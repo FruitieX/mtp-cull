@@ -27,6 +27,8 @@ measurements and their limits. The original design remains in
 | `quick_import.rs` | Preset device/list/copy state machine using the existing MTP worker |
 | `image_cache.rs` | Bounded decode pool, prioritized demand and CPU tier eviction |
 | `viewer.rs` | Shared transforms, side-by-side/wipe/blink, GPU cache and ROI |
+| `reel.rs`, `filmstrip.rs` | Transient batch selection, virtualized row/grid, navigation follow and context actions |
+| `mipmaps.rs`, `mipmaps.wgsl` | WGPU low-pass pyramid generation, trilinear sampling and deferred texture retirement |
 | `focus.rs`, `bursts.rs` | Native gradient maps and optional capture/similarity groups |
 | `imports.rs`, `safe_copy.rs` | Local import worker and verified no-clobber copies |
 | `mtp_worker/runtime.rs` | Single-device scheduling, generations, progress/cancel |
@@ -108,6 +110,33 @@ resource/CLI/checksum checks and an isolated install, upgrade, optional shortcut
 and uninstall test pass locally. Native Explorer-style no-argument launch confirms
 console detachment. Clean-machine and GitHub workflow execution remain unverified.
 See [docs/windows-packaging.md](docs/windows-packaging.md) for repeatable commands.
+
+## Reel selection and image sampling
+
+Editing selection is separate from persisted review decisions and import choices.
+Ctrl-click toggles, Shift-click selects a visible range and Ctrl+A selects visible
+shots without marking them Keep. Normal navigation collapses to the current shot;
+filters prune hidden members. Batch decisions use one History.apply transaction;
+auto-advance only applies to a single shot. Active comparison A takes precedence
+over a reel batch. Default Keep/Reject is now 1/2; Store migrates old default pairs
+and Ctrl+A bulk-Keep while preserving custom shortcuts and recording migration.
+
+The resizable reel virtualizes visible columns/rows, with follow requests only on
+navigation/filter/layout changes so manual scrolling stays independent. Row mode
+maps ordinary wheel input to horizontal scrolling. Settings persist height, grid
+mode, grid cell size and wheel multiplier. Vector button icons avoid missing font
+glyphs. Context actions route through the same command registry as shortcuts.
+Thumbnail GPU memory and per-frame uploads are bounded independently of the
+canvas, with visible thumbnails pinned.
+
+egui-wgpu managed textures contain one level even when TextureOptions requests
+mipmaps. Smooth sampling therefore registers native GPU textures, generates the
+pyramid once on upload and uses trilinear sampling. Existing linear/nearest modes
+use managed textures. Cache accounting includes each mip level; frame upload
+limits remain bounded. Native texture retirement waits for the next frame so
+current meshes retain valid image IDs. Session reset preserves the GPU backend.
+The native reel smoke includes GPU readback proving a pixel checkerboard averages
+to gray, plus actual mouse/keyboard input for batch/reel/context/resize behavior.
 
 ## Verification
 

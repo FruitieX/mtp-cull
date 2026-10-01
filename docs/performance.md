@@ -169,3 +169,51 @@ licenses, CLI success/errors and checksums. An isolated installer lifecycle test
 passes per-user install, upgrade, default/optional shortcuts, uninstall and
 preservation of unmanaged user files. Repeatable packaging commands and remaining
 clean-machine/release checks are in [windows-packaging.md](windows-packaging.md).
+
+## Reel selection and mipmapped sampling verification
+
+The default and SIMD functional suite passes 60 tests, with two fixture/benchmark
+tests opt-in. Formatting and strict Clippy pass, including the native smoke feature.
+New coverage checks batch selection/ranges, pruning filtered photos, JPEG/RAW
+linking with batch undo, single-shot auto-advance, active-A precedence, old shortcut
+migration and mip-level memory accounting.
+
+Native input tests at 2560x1440 and 1024x768 use a synthetic 500-shot session backed
+by three generated JPEG/RAF pairs. They exercise real egui keyboard/mouse events
+for arrow-key follow, Ctrl-click, Ctrl+A, batch decisions, reel/canvas context
+actions, ordinary wheel scrolling in row/grid and dragging the panel resize edge.
+This verifies session-scale layout/selection behavior, not camera throughput or
+500 independent cold image decodes. GPU readback verifies that an 8x8 pixel
+checkerboard averages to gray in its generated 1x1 mip level.
+
+The full native viewer/import/resume smoke also passes with Smooth sampling:
+
+| Native viewport (DPI 1) | Median UI CPU | p95 | Maximum |
+| --- | --- | --- | --- |
+| 2560x1440 | 0.247 ms | 0.343 ms | 2.135 ms |
+| 1024x768 | 0.268 ms | 0.428 ms | 1.759 ms |
+
+Each run has 117 warm frame samples. GPU presentation, input-to-photon latency and
+cold uploads are excluded. Real-photo moiré still needs visual assessment; the GPU
+check establishes that mip reduction works, rather than predicting every scene.
+
+Mipmaps are generated once per image upload on WGPU, with trilinear sampling on
+subsequent frames. Their levels count against the canvas GPU cache; the original
+native/focus pixels and analysis remain unchanged. Thumbnail uploads are capped
+at four textures/8 MiB per frame, and their separate cache is limited to 256
+textures or one quarter of the configured canvas budget (minimum 16 MiB).
+Visible thumbnails remain pinned. Row/grid rendering is virtualized.
+
+To repeat the reel check after building with `scripts/build-windows.ps1 -Smoke`,
+generate fixtures as above and use a fresh directory:
+
+```powershell
+$env:MTP_CULL_SMOKE_DIR = "$PWD/target/reel-smoke-new-run"
+$env:MTP_CULL_DATA_DIR = "$env:MTP_CULL_SMOKE_DIR/data"
+$env:MTP_CULL_SMOKE_REEL = '1'
+./target/release/mtp-cull.exe ui --source "$PWD/target/review-fixtures"
+```
+
+Use `MTP_CULL_SMOKE_SIZE=1024x768` for the compact run. Remove
+`MTP_CULL_SMOKE_REEL` for the full viewer/import smoke. Production package builds
+omit `ui-smoke`; these synthetic input events never run in normal use.

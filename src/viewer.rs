@@ -3,6 +3,44 @@ use eframe::egui::{self, Color32, Pos2, Rect, Sense, Vec2};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum Sampling {
+    #[default]
+    Smooth,
+    Linear,
+    Nearest,
+}
+impl Sampling {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Smooth => "Smooth (mipmaps)",
+            Self::Linear => "Linear",
+            Self::Nearest => "Nearest neighbor",
+        }
+    }
+    pub fn options(self) -> egui::TextureOptions {
+        match self {
+            Self::Smooth => {
+                egui::TextureOptions::LINEAR.with_mipmap_mode(Some(egui::TextureFilter::Linear))
+            }
+            Self::Linear => egui::TextureOptions::LINEAR,
+            Self::Nearest => egui::TextureOptions::NEAREST,
+        }
+    }
+    fn bytes(self, size: [usize; 2]) -> usize {
+        let (mut w, mut h) = (size[0], size[1]);
+        let mut bytes = w * h * 4;
+        if self == Self::Smooth {
+            while w > 1 || h > 1 {
+                w = (w / 2).max(1);
+                h = (h / 2).max(1);
+                bytes += w * h * 4;
+            }
+        }
+        bytes
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Mode {
     #[default]
@@ -77,9 +115,21 @@ impl Viewport {
     }
 }
 struct Texture {
-    handle: egui::TextureHandle,
+    handle: ImageTexture,
     bytes: usize,
     tick: u64,
+}
+enum ImageTexture {
+    Managed(egui::TextureHandle),
+    Mipmapped(crate::mipmaps::Texture),
+}
+impl ImageTexture {
+    fn id(&self) -> egui::TextureId {
+        match self {
+            Self::Managed(handle) => handle.id(),
+            Self::Mipmapped(texture) => texture.id,
+        }
+    }
 }
 struct Overlay {
     handle: egui::TextureHandle,
@@ -97,6 +147,13 @@ pub struct Canvas {
     pub region: Option<Rect>,
     pub region_tool: bool,
     pub center_region_on_load: bool,
+    sampling: Sampling,
+    gpu: Option<Arc<crate::mipmaps::Mipmapper>>,
+    pub context_command: Option<crate::review_commands::Command>,
+    #[cfg(feature = "ui-smoke")]
+    pub pane_rects: Vec<(bool, Rect)>,
+    #[cfg(feature = "ui-smoke")]
+    pub menu_items: Vec<(crate::review_commands::Command, Rect)>,
     textures: HashMap<Key, Texture>,
     overlays: HashMap<Key, Overlay>,
     tick: u64,
@@ -119,6 +176,13 @@ impl Default for Canvas {
             region: None,
             region_tool: false,
             center_region_on_load: false,
+            sampling: Sampling::default(),
+            gpu: None,
+            context_command: None,
+            #[cfg(feature = "ui-smoke")]
+            pane_rects: Vec::new(),
+            #[cfg(feature = "ui-smoke")]
+            menu_items: Vec::new(),
             textures: HashMap::new(),
             overlays: HashMap::new(),
             tick: 0,
@@ -139,10 +203,33 @@ pub struct ViewImage {
 }
 impl Canvas {
     pub fn reset(&mut self) {
+        let gpu = self.gpu.clone();
         *self = Self::default();
+        self.gpu = gpu;
+    }
+    pub fn set_gpu(&mut self, state: eframe::egui_wgpu::RenderState) {
+        self.gpu = Some(Arc::new(crate::mipmaps::Mipmapper::new(state)));
+    }
+    pub fn begin_frame(&self) {
+        if let Some(gpu) = &self.gpu {
+            gpu.collect();
+        }
+    }
+    #[cfg(feature = "ui-smoke")]
+    pub fn verify_mipmaps(&self) -> color_eyre::eyre::Result<()> {
+        self.gpu
+            .as_ref()
+            .ok_or_else(|| color_eyre::eyre::eyre!("WGPU mipmap renderer unavailable"))?
+            .verify_low_pass()
     }
     pub fn set_budget(&mut self, bytes: usize) {
         self.budget = bytes.max(64 * 1024 * 1024);
+    }
+    pub fn set_sampling(&mut self, sampling: Sampling) {
+        if self.sampling != sampling {
+            self.sampling = sampling;
+            self.textures.clear();
+        }
     }
     pub fn bytes(&self) -> usize {
         self.textures.values().map(|t| t.bytes).sum::<usize>()
@@ -181,6 +268,12 @@ impl Canvas {
         self.uploads_left = 2;
         self.upload_bytes_left = 32 * 1024 * 1024;
         self.uploaded = false;
+        self.context_command = None;
+        #[cfg(feature = "ui-smoke")]
+        {
+            self.pane_rects.clear();
+            self.menu_items.clear();
+        }
         let size = ui.available_size().max(egui::vec2(1.0, 1.0));
         let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
         ui.painter()
@@ -342,9 +435,54 @@ impl Canvas {
                 .with(("canvas-pane", b, rect.min.x.to_bits(), rect.min.y.to_bits())),
             Sense::click_and_drag(),
         );
-        if response.clicked() {
+        #[cfg(feature = "ui-smoke")]
+        self.pane_rects.push((b, clip));
+        if response.clicked() || response.secondary_clicked() {
             self.active_a = !b;
         }
+        response.context_menu(|ui| {
+            use crate::review_commands::Command;
+            for (label, command) in [
+                ("Keep", Command::Keep),
+                ("Reject", Command::Reject),
+                ("Unreviewed", Command::Clear),
+                ("Undo", Command::Undo),
+            ] {
+                let item = crate::theme::icon_button(
+                    ui,
+                    label,
+                    crate::theme::command_icon(command).unwrap(),
+                );
+                #[cfg(feature = "ui-smoke")]
+                self.menu_items.push((command, item.rect));
+                if item.clicked() {
+                    self.context_command = Some(command);
+                    ui.close();
+                }
+            }
+            ui.separator();
+            if b && crate::theme::icon_button(ui, "Pin as A", crate::theme::Icon::Pin).clicked() {
+                self.context_command = Some(Command::Pin);
+                ui.close();
+            }
+            for (label, command) in [
+                ("Fit / 100%", Command::Zoom),
+                ("Compare mode", Command::Compare),
+                ("Sharpness overlay", Command::Peaking),
+            ] {
+                let item = crate::theme::icon_button(
+                    ui,
+                    label,
+                    crate::theme::command_icon(command).unwrap(),
+                );
+                #[cfg(feature = "ui-smoke")]
+                self.menu_items.push((command, item.rect));
+                if item.clicked() {
+                    self.context_command = Some(command);
+                    ui.close();
+                }
+            }
+        });
         if response.double_clicked() {
             self.viewport.zoom = if self.viewport.zoom.is_some() {
                 None
@@ -502,17 +640,23 @@ impl Canvas {
         self.uploads_left -= 1;
         self.upload_bytes_left = self.upload_bytes_left.saturating_sub(bytes);
         self.uploaded = true;
-        let handle = ctx.load_texture(
-            format!("image:{}:{:?}", key.path.display(), key.edge),
-            picture.image.clone(),
-            egui::TextureOptions::LINEAR,
-        );
+        let handle = if self.sampling == Sampling::Smooth
+            && let Some(gpu) = &self.gpu
+        {
+            ImageTexture::Mipmapped(gpu.upload(&picture.image))
+        } else {
+            ImageTexture::Managed(ctx.load_texture(
+                format!("image:{}:{:?}", key.path.display(), key.edge),
+                picture.image.clone(),
+                self.sampling.options(),
+            ))
+        };
         let id = handle.id();
         self.textures.insert(
             key.clone(),
             Texture {
                 handle,
-                bytes: picture.image.pixels.len() * 4,
+                bytes: self.sampling.bytes(picture.image.size),
                 tick: self.tick,
             },
         );
@@ -538,6 +682,22 @@ impl Canvas {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mipmap_memory_is_counted_and_sampling_changes_invalidate_only_gpu_images() {
+        assert_eq!(Sampling::Linear.bytes([8, 8]), 256);
+        assert_eq!(Sampling::Smooth.bytes([8, 8]), (64 + 16 + 4 + 1) * 4);
+        assert_eq!(Sampling::Smooth.bytes([8, 1]), (8 + 4 + 2 + 1) * 4);
+        assert_eq!(
+            Sampling::Smooth.options().mipmap_mode,
+            Some(egui::TextureFilter::Linear)
+        );
+        let mut canvas = Canvas::default();
+        canvas.viewport.zoom = Some(1.0);
+        canvas.viewport.center = egui::vec2(0.25, 0.7);
+        canvas.set_sampling(Sampling::Nearest);
+        assert_eq!(canvas.viewport.zoom, Some(1.0));
+        assert_eq!(canvas.viewport.center, egui::vec2(0.25, 0.7));
+    }
     #[test]
     fn shared_view_maps_wipe_blink_pan_and_alignment_at_same_pixel_scale() {
         let pane = Rect::from_min_size(Pos2::ZERO, egui::vec2(1000.0, 700.0));

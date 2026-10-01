@@ -64,6 +64,30 @@ Media and decision filters sit above the filmstrip. **More** opens Settings,
 keyboard help and the command palette; **Performance** in the footer shows cache
 and frame diagnostics. Settings has separate Review, Performance and Shortcuts tabs.
 
+The reel follows the active photo when navigating with the arrow keys. Ctrl-click
+toggles photos in a batch; Shift-click selects a range (Ctrl+Shift adds a range).
+Ctrl+A selects all visible photos without changing their decisions. **Keep**,
+**Reject** and **Unreviewed** (Clear) apply to the batch as one undoable action.
+A normal click or previous/next navigation returns to one photo. Blue outlines and
+check marks show the editing selection; green/red/gray borders show decisions.
+Filtering drops hidden photos from the editing selection. When comparison pane A
+is active, decision commands apply to A instead of the reel batch. Import still
+copies all Keep decisions, independently of the current editing selection.
+
+Drag the reel's top edge to resize it; row previews grow with the panel. **Grid**
+(Ctrl+G) switches to multiple rows with vertical scrolling; **Row** returns to
+horizontal scrolling. A normal wheel scrolls left/right in Row mode and up/down
+in Grid mode; Shift is optional. Settings > Review adjusts reel scroll speed and
+grid thumbnail width. Layout and size preferences persist. Right-click a thumbnail
+for decision/selection/pin actions, or the canvas for decisions and viewing tools.
+
+Settings > Performance offers **Smooth (mipmaps)**, **Linear** and **Nearest
+neighbor** image sampling. Smooth is the default and reduces zoomed-out moiré with
+a GPU-generated low-pass pyramid and interpolation between levels. It uses about
+one-third more image texture memory, counted in the canvas cache budget. Linear
+keeps the previous sampling; nearest neighbor shows pixels without interpolation.
+Full-resolution focus analysis remains independent of display sampling.
+
 The welcome screen suggests the five most recently opened sources; **Recent** in
 the toolbar lists up to twelve. Folder entries also remember a separate RAW folder.
 Camera entries remember the device and folder path: clicking one reopens it after
@@ -119,7 +143,7 @@ the command palette. Tab/Enter/Space also operate focused UI controls.
 | Action | Default |
 | --- | --- |
 | Previous / next / next unreviewed | Left / Right / N |
-| Reject / keep / clear / toggle keep | 1 / 2 / 0 / Space |
+| Keep / reject / clear / toggle keep | 1 / 2 / 0 / Space |
 | Undo / redo | Ctrl+Z / Ctrl+Shift+Z |
 | Pin A / compare mode / swap / choose pane | P / C / S / Tab |
 | Hold A/B blink / fit-100% | B / Z |
@@ -131,13 +155,18 @@ the command palette. Tab/Enter/Space also operate focused UI controls.
 | Move region / resize | Shift+arrows / Ctrl+Minus-Equals |
 | JPEG / RAW / video / all media | J / F / V / A |
 | Unreviewed / kept / rejected / all decisions | U / K / X / Shift+A |
-| Keep / reject visible images | Ctrl+A / Ctrl+Backspace |
+| Select all visible / clear reel selection | Ctrl+A / Ctrl+Shift+A |
+| Toggle active photo in reel selection | Insert |
+| Row / grid reel | Ctrl+G |
+| Keep / reject visible images | Ctrl+Shift+K / Ctrl+Backspace |
 | Burst grouping / previous-next burst | Ctrl+B / Ctrl+PageUp-PageDown |
 | Open folder / camera / import | Ctrl+O / Ctrl+M / Ctrl+I |
 | Pause staging / retry / cancel | Ctrl+Space / F5 / Escape |
 
 Global shortcuts yield to text input and dialogs. Escape closes an idle dialog;
 outside a dialog it cancels an operation or pauses staging.
+Existing old default Keep/Reject and bulk-Keep bindings migrate to the new defaults;
+custom bindings are preserved.
 
 ## Performance and development
 

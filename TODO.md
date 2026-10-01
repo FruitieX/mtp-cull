@@ -135,3 +135,20 @@ formatting and strict Clippy pass. Installer lifecycle tests use a separate
 identity and workspace directory, preserving the real application's data.
 Clean Windows machine testing and GitHub workflow execution remain environment
 checks. Packages are currently unsigned; certificate-based signing is future work.
+
+## October 2026 reel and sampling improvements
+
+- [x] Default Keep to 1 and Reject to 2, migrating old defaults while preserving customized keys.
+- [x] Follow previous/next navigation when the active photo leaves the visible reel.
+- [x] Add Ctrl-click batch selection, Shift-click ranges and Ctrl+A selection without deciding.
+- [x] Apply Keep/Reject/Unreviewed to the batch with linked RAW decisions and one undo action.
+- [x] Resize the reel, scale row thumbnails and toggle a virtualized vertical grid with Ctrl+G.
+- [x] Scroll the row horizontally with an ordinary wheel and persist an adjustable wheel multiplier.
+- [x] Add thumbnail/canvas context menus, matching filter padding and drawn button icons.
+- [x] Add Smooth/Linear/Nearest sampling under Performance, with real GPU mipmaps and memory accounting.
+- [x] Test selection/linking/undo, key migration and mip budgets; exercise native reel input at 1440p and 1024x768.
+
+Verification passes 60 tests (two opt-in), strict Clippy and formatting. Native
+500-shot reel input and GPU checkerboard readback pass at both window sizes;
+the full viewer/focus/import/retry/resume smoke also passes. See
+[docs/performance.md](docs/performance.md) for timings and limits.

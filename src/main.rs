@@ -9,12 +9,14 @@ mod focus;
 mod image_cache;
 mod import_presets;
 mod imports;
+mod mipmaps;
 mod mtp_file;
 mod mtp_worker;
 #[cfg(test)]
 mod performance;
 mod quick_import;
 mod recent_sources;
+mod reel;
 mod review;
 mod review_commands;
 mod review_store;

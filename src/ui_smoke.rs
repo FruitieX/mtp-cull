@@ -2,8 +2,10 @@
 use super::*;
 use color_eyre::eyre::{bail, eyre};
 use std::collections::BTreeSet;
+const REEL_SHOTS: usize = 500;
 pub(super) struct Smoke {
     pub blink: bool,
+    pub input: Vec<egui::Event>,
     root: PathBuf,
     step: u8,
     frames: u32,
@@ -13,6 +15,9 @@ pub(super) struct Smoke {
     samples: Vec<f64>,
 }
 impl Smoke {
+    pub fn input_ready(&self) -> bool {
+        self.waiting.is_none()
+    }
     pub fn from_environment() -> Result<Option<Self>> {
         let Some(root) = std::env::var_os("MTP_CULL_SMOKE_DIR").map(PathBuf::from) else {
             return Ok(None);
@@ -35,6 +40,7 @@ impl Smoke {
             received: BTreeSet::new(),
             samples: Vec::new(),
             blink: false,
+            input: Vec::new(),
         }))
     }
     pub fn fail(&mut self, ctx: &egui::Context, message: &str) {
@@ -49,6 +55,370 @@ impl Smoke {
             name.to_owned(),
         )));
         self.frames = 0;
+    }
+    fn click(&mut self, pos: egui::Pos2, button: egui::PointerButton, modifiers: egui::Modifiers) {
+        self.input.extend([
+            egui::Event::ModifiersChanged(modifiers),
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button,
+                pressed: true,
+                modifiers,
+            },
+            egui::Event::PointerButton {
+                pos,
+                button,
+                pressed: false,
+                modifiers,
+            },
+        ]);
+    }
+    fn key(&mut self, key: egui::Key, modifiers: egui::Modifiers) {
+        self.input.push(egui::Event::ModifiersChanged(modifiers));
+        self.input.push(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        });
+        self.input.push(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers,
+        });
+    }
+    fn tick_reel(&mut self, app: &mut App, ctx: &egui::Context) -> Result<()> {
+        let ctrl = egui::Modifiers::CTRL;
+        match self.step {
+            0 => {
+                app.canvas.verify_mipmaps()?;
+                let source = app
+                    .session
+                    .as_ref()
+                    .ok_or_else(|| eyre!("reel smoke needs JPEG fixtures"))?;
+                let originals = source
+                    .shots
+                    .iter()
+                    .filter(|s| s.has(Kind::Jpeg))
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if originals.len() != 3 {
+                    bail!("reel smoke needs three paired photos");
+                }
+                let mut session = source.clone();
+                session.id.push_str("-synthetic-reel-smoke");
+                session.shots = (0..REEL_SHOTS)
+                    .map(|i| {
+                        let mut shot = originals[i % 3].clone();
+                        shot.id = format!("reel-{i}");
+                        shot.name = format!("PHOTO_{i:04}");
+                        for asset in &mut shot.assets {
+                            asset.id = format!("reel-{i}-{:?}", asset.kind);
+                            asset.key = asset.id.clone();
+                            asset.decision = Decision::Unreviewed;
+                        }
+                        shot
+                    })
+                    .collect();
+                app.install(session);
+                app.settings.reel_grid = false;
+                self.step = 1;
+            }
+            1 => {
+                for _ in 0..79 {
+                    app.command(Command::Next);
+                }
+                self.key(egui::Key::ArrowRight, egui::Modifiers::NONE);
+                self.step = 2;
+            }
+            2 => {
+                if app.selected != 80
+                    || !app
+                        .reel_cells
+                        .iter()
+                        .any(|(i, r)| *i == 80 && app.reel_clip.contains(r.center()))
+                {
+                    bail!(
+                        "row did not follow keyboard navigation: {} / {:?}",
+                        app.selected,
+                        app.reel_viewport
+                    );
+                }
+                self.capture(ctx, "reel-row-follow");
+                self.step = 3;
+            }
+            3 if app.selected == 80 => {
+                app.selected = 0;
+                app.reel_selection.single(0);
+                app.reel_follow = true;
+                self.frames = 0;
+                return Ok(());
+            }
+            3 => {
+                let rect = app
+                    .reel_cells
+                    .iter()
+                    .find(|(i, _)| *i == 2)
+                    .ok_or_else(|| eyre!("third thumbnail missing"))?
+                    .1;
+                self.click(rect.center(), egui::PointerButton::Primary, ctrl);
+                self.step = 4;
+            }
+            4 => {
+                if app
+                    .reel_selection
+                    .indices
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+                    != [0, 2]
+                {
+                    bail!("Ctrl-click did not add to selection");
+                }
+                self.capture(ctx, "reel-multiselect");
+                self.key(egui::Key::A, ctrl);
+                self.step = 5;
+            }
+            5 => {
+                if app.reel_selection.indices.len() != REEL_SHOTS
+                    || !app
+                        .session
+                        .as_ref()
+                        .unwrap()
+                        .selected_ids(&app.settings)
+                        .is_empty()
+                {
+                    bail!("Ctrl+A changed decisions or failed to select all");
+                }
+                self.key(egui::Key::Num1, egui::Modifiers::NONE);
+                self.step = 6;
+            }
+            6 => {
+                if app
+                    .session
+                    .as_ref()
+                    .unwrap()
+                    .selected_ids(&app.settings)
+                    .len()
+                    != REEL_SHOTS * 2
+                {
+                    bail!("1 did not keep all selected JPEG/RAW pairs");
+                }
+                self.key(egui::Key::Num0, egui::Modifiers::NONE);
+                self.step = 7;
+            }
+            7 => {
+                if !app
+                    .session
+                    .as_ref()
+                    .unwrap()
+                    .selected_ids(&app.settings)
+                    .is_empty()
+                {
+                    bail!("0 did not clear batch decisions");
+                }
+                let rect = app.reel_cells.iter().find(|(i, _)| *i == 2).unwrap().1;
+                self.click(
+                    rect.center(),
+                    egui::PointerButton::Secondary,
+                    egui::Modifiers::NONE,
+                );
+                self.step = 8;
+            }
+            8 => {
+                let item = app
+                    .reel_menu_items
+                    .iter()
+                    .find(|(c, _)| *c == Command::Reject)
+                    .ok_or_else(|| eyre!("thumbnail context menu did not open"))?
+                    .1;
+                self.capture(ctx, "reel-context-menu");
+                self.click(
+                    item.center(),
+                    egui::PointerButton::Primary,
+                    egui::Modifiers::NONE,
+                );
+                self.step = 9;
+            }
+            9 => {
+                if !app
+                    .session
+                    .as_ref()
+                    .unwrap()
+                    .shots
+                    .iter()
+                    .all(|s| s.decision(Kind::Jpeg, true) == Decision::Reject)
+                {
+                    bail!("context menu failed to reject the batch");
+                }
+                app.command(Command::ReelMode);
+                for _ in 0..78 {
+                    app.command(Command::Next);
+                }
+                self.step = 10;
+            }
+            10 => {
+                if !app.settings.reel_grid
+                    || app.reel_viewport.min.y <= 0.0
+                    || !app
+                        .reel_cells
+                        .iter()
+                        .any(|(i, r)| *i == 80 && app.reel_clip.contains(r.center()))
+                {
+                    bail!("grid did not follow navigation");
+                }
+                self.capture(ctx, "reel-grid-follow");
+                let rect = app
+                    .canvas
+                    .pane_rects
+                    .iter()
+                    .find(|(b, _)| *b)
+                    .ok_or_else(|| eyre!("canvas not loaded"))?
+                    .1;
+                self.click(
+                    rect.center(),
+                    egui::PointerButton::Secondary,
+                    egui::Modifiers::NONE,
+                );
+                self.step = 11;
+            }
+            11 => {
+                let item = app
+                    .canvas
+                    .menu_items
+                    .iter()
+                    .find(|(c, _)| *c == Command::Keep)
+                    .ok_or_else(|| eyre!("canvas context menu did not open"))?
+                    .1;
+                self.capture(ctx, "canvas-context-menu");
+                self.click(
+                    item.center(),
+                    egui::PointerButton::Primary,
+                    egui::Modifiers::NONE,
+                );
+                self.step = 12;
+            }
+            12 => {
+                if app.session.as_ref().unwrap().shots[80].decision(Kind::Jpeg, true)
+                    != Decision::Keep
+                {
+                    bail!("canvas keep action failed");
+                }
+                let before = app.reel_viewport.min.y;
+                std::fs::write(self.root.join("scroll-before.txt"), before.to_string())?;
+                self.input.extend([
+                    egui::Event::PointerMoved(app.reel_clip.center()),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        phase: egui::TouchPhase::Move,
+                        delta: egui::vec2(0.0, -120.0),
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                self.step = 13;
+            }
+            13 => {
+                let before =
+                    std::fs::read_to_string(self.root.join("scroll-before.txt"))?.parse::<f32>()?;
+                if app.reel_viewport.min.y <= before {
+                    bail!("ordinary wheel did not scroll grid");
+                }
+                app.command(Command::ReelMode);
+                self.step = 14;
+            }
+            14 => {
+                std::fs::write(
+                    self.root.join("scroll-before.txt"),
+                    app.reel_viewport.min.x.to_string(),
+                )?;
+                self.input.extend([
+                    egui::Event::PointerMoved(app.reel_clip.center()),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        phase: egui::TouchPhase::Move,
+                        delta: egui::vec2(0.0, -120.0),
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                self.step = 15;
+            }
+            15 => {
+                let before =
+                    std::fs::read_to_string(self.root.join("scroll-before.txt"))?.parse::<f32>()?;
+                if app.reel_viewport.min.x <= before {
+                    bail!("ordinary wheel did not scroll row horizontally");
+                }
+                // Exercise the actual panel edge with press/move/release events.
+                let edge = app.reel_panel_bounds.center_top();
+                std::fs::write(
+                    self.root.join("height-before.txt"),
+                    app.settings.reel_height.to_string(),
+                )?;
+                self.input.extend([
+                    egui::Event::PointerMoved(edge),
+                    egui::Event::PointerButton {
+                        pos: edge,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                self.step = 16;
+            }
+            16 => {
+                let pos = ctx.input(|i| i.pointer.latest_pos()).unwrap() - egui::vec2(0.0, 80.0);
+                self.input.push(egui::Event::PointerMoved(pos));
+                self.step = 17;
+            }
+            17 => {
+                let pos = ctx.input(|i| i.pointer.latest_pos()).unwrap();
+                self.input.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                self.step = 18;
+            }
+            18 => {
+                let before =
+                    std::fs::read_to_string(self.root.join("height-before.txt"))?.parse::<f32>()?;
+                if app.settings.reel_height <= before + 20.0 {
+                    bail!(
+                        "panel edge did not resize reel: {before} -> {}",
+                        app.settings.reel_height
+                    );
+                }
+                self.capture(ctx, "reel-resized");
+                self.step = 19;
+            }
+            19 if !app.settings_open => {
+                app.command(Command::Settings);
+                app.settings_tab = 1;
+                self.frames = 0;
+                return Ok(());
+            }
+            19 => {
+                self.capture(ctx, "reel-performance-settings");
+                self.step = 20;
+            }
+            20 => {
+                std::fs::write(
+                    self.root.join("PASS.txt"),
+                    "PASS: synthetic 500-photo reel; keyboard-follow in row/grid; Ctrl-click batch; Ctrl+A selection; 1/0 batch decisions; thumbnail and canvas context actions; normal-wheel scrolling; native panel resize; GPU checkerboard low-pass readback.\n",
+                )?;
+                self.step = 255;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            _ => bail!("invalid reel smoke step"),
+        }
+        self.frames = 0;
+        Ok(())
     }
     pub fn tick(&mut self, app: &mut App, ctx: &egui::Context) -> Result<()> {
         if self.step == 255 {
@@ -100,8 +470,15 @@ impl Smoke {
             return Ok(());
         }
         // Allow popup animation to finish before judging editor layout.
-        if matches!(self.step, 25 | 31) && self.frames < 40 {
+        if (matches!(self.step, 25 | 31)
+            || (std::env::var_os("MTP_CULL_SMOKE_REEL").is_some()
+                && matches!(self.step, 8 | 11 | 19)))
+            && self.frames < 40
+        {
             return Ok(());
+        }
+        if std::env::var_os("MTP_CULL_SMOKE_REEL").is_some() {
+            return self.tick_reel(app, ctx);
         }
         match self.step {
             0 if std::env::var_os("MTP_CULL_SMOKE_HOME_ONLY").is_some() => {

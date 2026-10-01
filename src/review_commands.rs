@@ -60,6 +60,10 @@ pub enum Command {
     All,
     BulkKeep,
     BulkReject,
+    SelectAll,
+    DeselectAll,
+    ToggleReelSelection,
+    ReelMode,
     Import,
     Presets,
     Settings,
@@ -278,25 +282,25 @@ pub const COMMANDS: &[Spec] = &[
     Spec {
         command: Command::Reject,
         id: "reject",
-        label: "Reject active image",
-        key: "1",
+        label: "Reject selected images / active pane",
+        key: "2",
     },
     Spec {
         command: Command::Keep,
         id: "keep",
-        label: "Keep active image",
-        key: "2",
+        label: "Keep selected images / active pane",
+        key: "1",
     },
     Spec {
         command: Command::Clear,
         id: "clear",
-        label: "Clear active decision",
+        label: "Mark selected images unreviewed / active pane",
         key: "0",
     },
     Spec {
         command: Command::ToggleKeep,
         id: "toggle_keep",
-        label: "Toggle selection",
+        label: "Toggle Keep for selected images / active pane",
         key: "Space",
     },
     Spec {
@@ -417,13 +421,37 @@ pub const COMMANDS: &[Spec] = &[
         command: Command::BulkKeep,
         id: "bulk_keep",
         label: "Keep visible images",
-        key: "Ctrl+A",
+        key: "Ctrl+Shift+K",
     },
     Spec {
         command: Command::BulkReject,
         id: "bulk_reject",
         label: "Reject visible images",
         key: "Ctrl+Backspace",
+    },
+    Spec {
+        command: Command::SelectAll,
+        id: "select_all",
+        label: "Select all visible images",
+        key: "Ctrl+A",
+    },
+    Spec {
+        command: Command::DeselectAll,
+        id: "deselect_all",
+        label: "Clear reel selection",
+        key: "Ctrl+Shift+A",
+    },
+    Spec {
+        command: Command::ToggleReelSelection,
+        id: "toggle_reel_selection",
+        label: "Toggle active photo in reel selection",
+        key: "Insert",
+    },
+    Spec {
+        command: Command::ReelMode,
+        id: "reel_mode",
+        label: "Toggle reel row / grid",
+        key: "Ctrl+G",
     },
     Spec {
         command: Command::Import,
@@ -557,7 +585,7 @@ mod tests {
     fn defaults_are_valid_and_conflicting_customizations_are_rejected() {
         let mut bindings = std::collections::BTreeMap::new();
         validate(&bindings).unwrap();
-        bindings.insert("keep".into(), "1".into());
+        bindings.insert("keep".into(), "2".into());
         assert!(validate(&bindings).is_err());
         assert!(parse("Ctrl+made-up").is_none());
     }
