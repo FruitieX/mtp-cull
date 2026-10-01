@@ -132,6 +132,8 @@ impl Default for Canvas {
 }
 pub struct ViewImage {
     pub name: String,
+    pub status_color: Color32,
+    pub status_label: &'static str,
     pub key: Option<Key>,
     pub fallback: Option<Key>,
 }
@@ -282,7 +284,18 @@ impl Canvas {
     ) {
         let label = if b { "B" } else { "A" };
         let painter = ui.painter().with_clip_rect(clip);
+        let status_border = |bounds: Rect| {
+            if bounds.is_positive() {
+                painter.rect_stroke(
+                    bounds,
+                    0.0,
+                    egui::Stroke::new(3.0, image.status_color),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        };
         let Some(key) = &image.key else {
+            status_border(clip);
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -307,6 +320,7 @@ impl Canvas {
                     .and_then(|k| cache.get(k).map(|p| (k.clone(), p, false)))
             });
         let Some((loaded, picture, native_ready)) = picture else {
+            status_border(clip);
             let text = cache.failure(key).unwrap_or("Loading preview…");
             painter.text(
                 rect.center(),
@@ -423,7 +437,7 @@ impl Canvas {
                 );
             }
         }
-        let mut text = format!("{label} · {}", image.name);
+        let mut text = format!("{label} · {} · {}", image.name, image.status_label);
         if self.native() {
             text.push_str(if native_ready {
                 " · native detail"
@@ -462,6 +476,10 @@ impl Canvas {
                 Color32::WHITE
             },
         );
+        // Outline the visible photo, so its state stays visible at any zoom.
+        // Wipe panes each outline their own clipped portion in the same color
+        // as their filmstrip card, including while holding A/B blink.
+        status_border(image_rect.intersect(clip));
     }
     fn texture(
         &mut self,

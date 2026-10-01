@@ -898,8 +898,13 @@ impl App {
     fn view_image(&self, index: usize, edge: u32) -> ViewImage {
         let shot = self.session.as_ref().and_then(|s| s.shots.get(index));
         let path = shot.and_then(|s| s.preview()).map(|p| p.to_owned());
+        let decision = shot.map_or(Decision::Unreviewed, |shot| {
+            shot.decision(shot.review_kind(self.media_filter), self.settings.link_raw)
+        });
         ViewImage {
             name: shot.map_or_else(|| "No image".into(), |s| s.name.clone()),
+            status_color: decision_color(decision),
+            status_label: decision.label(),
             key: path.clone().map(|p| {
                 if self.canvas.native() {
                     if self.canvas.needs_focus() {
@@ -1447,14 +1452,14 @@ impl App {
                         rect,
                         4.0,
                         egui::Stroke::new(
-                            if index == self.selected { 2.0 } else { 1.0 },
                             if index == self.selected {
-                                theme::ACCENT
+                                3.0
                             } else if response.hovered() {
-                                theme::MUTED
+                                2.0
                             } else {
-                                theme::BORDER
+                                1.5
                             },
+                            color,
                         ),
                         egui::StrokeKind::Inside,
                     );
@@ -2059,8 +2064,8 @@ impl Drop for App {
 }
 fn decision_color(decision: Decision) -> egui::Color32 {
     match decision {
-        Decision::Keep => theme::ACCENT,
-        Decision::Reject => theme::REJECT,
+        Decision::Keep => egui::Color32::from_rgb(93, 203, 148),
+        Decision::Reject => egui::Color32::from_rgb(232, 114, 122),
         Decision::Unreviewed => theme::MUTED,
     }
 }
