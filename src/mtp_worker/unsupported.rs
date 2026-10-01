@@ -16,4 +16,8 @@ impl MtpWorker {
     pub fn try_recv(&self) -> Option<MtpEvent> {
         None
     }
+
+    pub fn recv(&self) -> Result<MtpEvent> {
+        bail!("the direct MTP worker is only available on Windows and Linux")
+    }
 }

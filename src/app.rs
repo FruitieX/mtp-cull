@@ -735,6 +735,7 @@ impl App {
         }
         for event in events {
             match event {
+                MtpEvent::FilesListed(_) | MtpEvent::CopyFinished(_) => {}
                 MtpEvent::Devices(devices) => self.devices = devices,
                 MtpEvent::SourceFolders { device_id, folders } => {
                     if self.device.as_ref() == Some(&device_id) {

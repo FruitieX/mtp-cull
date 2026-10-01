@@ -1,7 +1,11 @@
+use super::ProgressReporter;
 use super::{
-    MtpDevice, MtpEvent, RemoteAsset, RemoteSession, RemoteShot, SourceFolder,
-    planning::{classify_media_name, plan_import},
+    MtpCopyError, MtpCopyItem, MtpCopyResult, MtpDevice, MtpEvent, MtpFileInfo, RemoteAsset,
+    RemoteSession, RemoteShot, SourceFolder, check_cancelled, is_cancelled,
+    planning::{classify_media_name, normalize_source_path, plan_import},
+    send_progress,
 };
+use crate::mtp_file::MtpFileType;
 use crate::safe_copy::{CopyOutcome, CopyWriter, copy_reader_verified};
 use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use futures::executor::block_on;
@@ -21,6 +25,9 @@ impl MtpWorker {
     pub fn send(&self, request: super::MtpRequest) -> Result<()> {
         self.0.send(request)
     }
+    pub fn recv(&self) -> Result<MtpEvent> {
+        self.0.recv()
+    }
     pub fn try_recv(&self) -> Option<MtpEvent> {
         self.0.try_recv()
     }
@@ -30,6 +37,7 @@ impl MtpWorker {
 struct WorkerState {
     source_folders: HashMap<String, HashMap<String, FolderReference>>,
     session: Option<PrivateSession>,
+    legacy_session: Option<LegacySession>,
 }
 
 #[derive(Clone)]
@@ -43,6 +51,11 @@ struct PrivateSession {
     public: RemoteSession,
     objects: HashMap<String, ObjectHandle>,
     cache_directory: PathBuf,
+}
+
+struct LegacySession {
+    storages: HashMap<StorageId, Storage>,
+    objects: HashMap<String, (StorageId, ObjectHandle)>,
 }
 
 impl WorkerState {
@@ -315,6 +328,167 @@ impl WorkerState {
     }
 }
 
+impl WorkerState {
+    fn list_files(
+        &mut self,
+        device_id: &str,
+        path: Option<&str>,
+        events: &mut super::EventSink<'_>,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<MtpFileInfo>> {
+        self.session = None;
+        self.legacy_session = None;
+        let device = open_device(device_id)?;
+        let storages = block_on(device.storages()).wrap_err("failed to enumerate MTP storages")?;
+        let requested = path.map(normalize_source_path).transpose()?;
+        let mut files = Vec::new();
+        let mut storage_objects = HashMap::new();
+        let mut legacy_storages = HashMap::new();
+        let mut matched_storage = false;
+        let mut progress = ProgressReporter::new(events, cancel, "list files");
+
+        for storage in storages {
+            check_cancelled(cancel)?;
+            let storage_id = storage.id();
+            let storage_name = storage_name(&storage);
+            let (source, root_path) = match &requested {
+                None => (None, storage_name.clone()),
+                Some(path) => {
+                    let components = path.components().collect::<Vec<_>>();
+                    if components
+                        .first()
+                        .and_then(|component| component.as_os_str().to_str())
+                        != Some(storage_name.as_str())
+                    {
+                        continue;
+                    }
+                    matched_storage = true;
+                    let folder_components = components[1..]
+                        .iter()
+                        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>();
+                    let source = block_on(resolve_folder(&storage, &folder_components))?;
+                    (source, path.to_string_lossy().into_owned())
+                }
+            };
+            let mut collection = LegacyCollection {
+                device_id,
+                storage_id,
+                root_path: &root_path,
+                files: &mut files,
+                objects: &mut storage_objects,
+                progress: &mut progress,
+            };
+            block_on(collect_legacy_media(&storage, source, &mut collection))?;
+            legacy_storages.insert(storage_id, storage);
+        }
+
+        if requested.is_some() && !matched_storage {
+            return Err(eyre!(
+                "failed to find MTP path {:?}",
+                path.unwrap_or_default()
+            ));
+        }
+
+        files.sort_by(|left, right| {
+            left.file_type
+                .copy_order()
+                .cmp(&right.file_type.copy_order())
+                .then(left.name.cmp(&right.name))
+        });
+        self.legacy_session = Some(LegacySession {
+            storages: legacy_storages,
+            objects: storage_objects,
+        });
+        Ok(files)
+    }
+
+    fn copy_files(
+        &mut self,
+        files: Vec<MtpCopyItem>,
+        keep_going: bool,
+        events: &mut super::EventSink<'_>,
+        cancel: &AtomicBool,
+    ) -> Result<MtpEvent> {
+        let session = self
+            .legacy_session
+            .as_ref()
+            .ok_or_else(|| eyre!("list MTP files before copying"))?;
+        let total_bytes = files.iter().map(|file| file.size).sum();
+        let mut completed_bytes = 0;
+        let mut copied_files = 0;
+        let mut skipped_files = 0;
+        let mut copied_bytes = 0;
+        let mut errors = Vec::new();
+
+        for file in files {
+            check_cancelled(cancel)?;
+            send_progress(
+                events,
+                cancel,
+                "copy files",
+                completed_bytes,
+                Some(total_bytes),
+                format!(
+                    "Copying {} to {}",
+                    file.source_path,
+                    file.destination.display()
+                ),
+            )?;
+            let result = (|| {
+                let (storage_id, handle) =
+                    *session.objects.get(&file.object_id).ok_or_else(|| {
+                        eyre!("MTP object {:?} is no longer retained", file.object_id)
+                    })?;
+                let storage = session
+                    .storages
+                    .get(&storage_id)
+                    .ok_or_else(|| eyre!("MTP storage {:?} is no longer retained", storage_id.0))?;
+                block_on(copy_windowed_no_clobber(
+                    storage,
+                    handle,
+                    file.size,
+                    &file.destination,
+                    &file.source_path,
+                    &mut |bytes| {
+                        send_progress(
+                            events,
+                            cancel,
+                            "copy files",
+                            completed_bytes + bytes,
+                            Some(total_bytes),
+                            file.source_path.clone(),
+                        )
+                    },
+                ))
+                .map(|(outcome, _)| outcome)
+            })();
+            match result {
+                Ok(CopyOutcome::Copied) => {
+                    copied_files += 1;
+                    copied_bytes += file.size;
+                }
+                Ok(CopyOutcome::SkippedExisting) => skipped_files += 1,
+                Err(error) if is_cancelled(&error) => return Err(error),
+                Err(error) if keep_going => errors.push(MtpCopyError {
+                    source_path: file.source_path,
+                    message: format!("{error:#}"),
+                }),
+                Err(error) => return Err(error),
+            }
+            completed_bytes += file.size;
+        }
+
+        Ok(MtpEvent::CopyFinished(MtpCopyResult {
+            copied_files,
+            skipped_files,
+            copied_bytes,
+            total_bytes,
+            errors,
+        }))
+    }
+}
+
 impl super::runtime::Backend for WorkerState {
     fn devices(&mut self) -> Result<Vec<MtpDevice>> {
         self.list_devices()
@@ -348,7 +522,26 @@ impl super::runtime::Backend for WorkerState {
     ) -> Result<MtpEvent> {
         self.import_assets(ids, destinations, progress, cancel)
     }
+    fn files(
+        &mut self,
+        device: &str,
+        path: Option<&str>,
+        events: &mut super::EventSink<'_>,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<MtpFileInfo>> {
+        self.list_files(device, path, events, cancel)
+    }
+    fn copy(
+        &mut self,
+        files: Vec<MtpCopyItem>,
+        keep_going: bool,
+        events: &mut super::EventSink<'_>,
+        cancel: &AtomicBool,
+    ) -> Result<MtpEvent> {
+        self.copy_files(files, keep_going, events, cancel)
+    }
     fn close(&mut self) {
+        self.legacy_session = None;
         self.session = None;
     }
 }
@@ -549,6 +742,49 @@ fn object_id(device_id: &str, storage_id: StorageId, handle: ObjectHandle) -> St
 
 fn join_remote_path(parent: &str, name: &str) -> String {
     format!("{parent}/{name}")
+}
+
+struct LegacyCollection<'a, 'b, 'sink> {
+    device_id: &'a str,
+    storage_id: StorageId,
+    root_path: &'a str,
+    files: &'a mut Vec<MtpFileInfo>,
+    objects: &'a mut HashMap<String, (StorageId, ObjectHandle)>,
+    progress: &'a mut ProgressReporter<'b, 'sink>,
+}
+async fn collect_legacy_media(
+    storage: &Storage,
+    source: Option<ObjectHandle>,
+    collection: &mut LegacyCollection<'_, '_, '_>,
+) -> Result<()> {
+    let mut pending = vec![(source, collection.root_path.to_owned())];
+    while let Some((parent, parent_path)) = pending.pop() {
+        collection.progress.check()?;
+        for object in list_objects_complete(storage, parent).await? {
+            collection.progress.check()?;
+            let path = join_remote_path(&parent_path, &object.filename);
+            if object.is_folder() {
+                pending.push((Some(object.handle), path));
+                continue;
+            }
+            let Ok(file_type) = MtpFileType::try_from_file_name(&object.filename) else {
+                continue;
+            };
+            let object_id = object_id(collection.device_id, collection.storage_id, object.handle);
+            collection
+                .objects
+                .insert(object_id.clone(), (collection.storage_id, object.handle));
+            collection.files.push(MtpFileInfo {
+                object_id,
+                name: object.filename,
+                path: path.clone(),
+                file_type,
+                size: object.size,
+            });
+            collection.progress.step(path)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

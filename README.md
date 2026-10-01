@@ -1,7 +1,7 @@
 # mtp-cull
 
 Review camera JPEGs on the PC, choose the keepers, then copy their JPEG and RAW
-originals to your NAS. Source files remain intact. The existing Windows CLI
+originals to your NAS. Source files remain intact. The MTP CLI
 copy command keeps its original workflow.
 
 ## Run
@@ -26,7 +26,7 @@ cargo run --release -- ui --source "C:/Photos/session" --raw-source "C:/Photos/R
 Linux direct MTP setup is covered in [docs/linux.md](docs/linux.md). With CMake
 and NASM available, use `cargo run --release --features turbo -- ui`.
 Direct MTP supports Windows and Linux; local-folder review also targets macOS.
-The older MTP CLI commands support Windows.
+The MTP CLI commands support Windows and Linux through the same device worker.
 
 ## Review workflow
 

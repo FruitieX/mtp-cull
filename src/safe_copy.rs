@@ -117,16 +117,6 @@ impl CopyWriter {
     }
 }
 
-/// Copies a reader through a same-directory temporary file without replacing an existing target.
-pub fn copy_reader_no_clobber(
-    input: &mut impl Read,
-    expected_size: u64,
-    target_path: &Path,
-    source_label: &str,
-) -> Result<CopyOutcome> {
-    copy_reader_with_progress(input, expected_size, target_path, source_label, |_| Ok(()))
-}
-
 /// Progress runs between bounded chunks and may abort before publication.
 pub fn copy_reader_with_progress(
     input: &mut impl Read,
@@ -232,5 +222,66 @@ mod tests {
         .unwrap();
         assert_eq!(second.0, CopyOutcome::SkippedExisting);
         assert_eq!(std::fs::read(&target).unwrap(), bytes);
+    }
+}
+
+#[cfg(test)]
+mod writer_tests {
+    use super::{CopyOutcome, CopyWriter};
+
+    fn copy_bytes(
+        bytes: &[u8],
+        expected_size: u64,
+        target: &std::path::Path,
+    ) -> color_eyre::eyre::Result<CopyOutcome> {
+        let mut writer = CopyWriter::new(expected_size, target, "test source")?;
+        writer.write(bytes)?;
+        writer.finish()
+    }
+
+    #[test]
+    fn copies_atomically_and_confirms_identical_existing_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("photo.jpg");
+
+        assert_eq!(
+            copy_bytes(b"photo", 5, &target).unwrap(),
+            CopyOutcome::Copied
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"photo");
+        assert_eq!(
+            copy_bytes(b"photo", 5, &target).unwrap(),
+            CopyOutcome::SkippedExisting
+        );
+    }
+
+    #[test]
+    fn incomplete_transfer_never_creates_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("photo.jpg");
+
+        assert!(copy_bytes(b"short", 10, &target).is_err());
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn differing_existing_content_is_never_overwritten() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("photo.jpg");
+        std::fs::write(&target, b"other").unwrap();
+
+        assert!(copy_bytes(b"photo", 5, &target).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"other");
+    }
+
+    #[test]
+    fn abandoning_a_writer_never_creates_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("photo.jpg");
+        let mut writer = CopyWriter::new(10, &target, "test source").unwrap();
+        writer.write(b"partial").unwrap();
+        drop(writer);
+
+        assert!(!target.exists());
     }
 }

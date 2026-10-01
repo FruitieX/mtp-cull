@@ -1,6 +1,5 @@
 use color_eyre::eyre::{Result, eyre};
 use std::fmt::{Display, Formatter};
-use std::io::Read;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MtpFileType {
@@ -44,52 +43,6 @@ impl Display for MtpFileType {
             Self::RawImage => write!(f, "Raw image"),
             Self::Video => write!(f, "Video"),
         }
-    }
-}
-
-pub trait MtpFileSource {
-    fn open(&self) -> Result<Box<dyn Read + '_>>;
-}
-
-pub struct MtpFile {
-    pub name: String,
-    pub path: String,
-    pub file_type: MtpFileType,
-    pub size: u64,
-    source: Box<dyn MtpFileSource>,
-}
-
-impl MtpFile {
-    pub fn new(
-        name: String,
-        path: String,
-        file_type: MtpFileType,
-        size: u64,
-        source: Box<dyn MtpFileSource>,
-    ) -> Self {
-        Self {
-            name,
-            path,
-            file_type,
-            size,
-            source,
-        }
-    }
-
-    pub fn open(&self) -> Result<Box<dyn Read + '_>> {
-        self.source.open()
-    }
-}
-
-impl Display for MtpFile {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} ({:?}): {}",
-            self.path,
-            self.file_type,
-            size::Size::from_bytes(self.size)
-        )
     }
 }
 

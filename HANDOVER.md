@@ -5,7 +5,8 @@
 The camera-first UI has been replaced. `main.rs` maps `ui` to `app.rs`; the old
 `ui.rs` is retained as historical source, and `culling.rs` only compiles for its
 legacy database/orientation regression tests. Pre-existing working-tree edits were
-preserved; no commit was created during this redesign.
+preserved in checkpoint commit `855d1bf`. The remote CLI improvements were merged
+into the device worker while retaining the new viewer and persistent staging.
 
 Use [README.md](README.md) for workflow/build/shortcuts and [TODO.md](TODO.md) for
 the implementation checklist. [docs/performance.md](docs/performance.md) records
@@ -60,7 +61,7 @@ smoke harness only against fixtures with its own output/database directory.
 
 Validate a full X-T5/NAS session, disconnect/reconnect and cancellation behavior on
 the physical camera. Native Linux USB/udev checks remain necessary; see
-[docs/linux.md](docs/linux.md). CLI MTP copying remains Windows-only.
+[docs/linux.md](docs/linux.md). CLI MTP listing and copying support Windows and Linux.
 
 RAW rendering, video playback, color-managed previews, automatic image registration,
 face/eye suggestions, offline camera manifest browsing, and source deletion are

@@ -8,7 +8,6 @@ mod culling;
 mod focus;
 mod image_cache;
 mod imports;
-mod mtp;
 mod mtp_file;
 mod mtp_worker;
 #[cfg(test)]

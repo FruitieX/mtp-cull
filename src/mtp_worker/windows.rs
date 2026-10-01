@@ -1,7 +1,10 @@
 use super::{
-    MtpDevice, MtpEvent, RemoteAsset, RemoteSession, RemoteShot, SourceFolder,
-    planning::{classify_media_name, plan_import},
+    MtpCopyError, MtpCopyItem, MtpCopyResult, MtpDevice, MtpEvent, MtpFileInfo, RemoteAsset,
+    RemoteSession, RemoteShot, SourceFolder, check_cancelled, is_cancelled,
+    planning::{classify_media_name, normalize_source_path, plan_import},
+    send_progress,
 };
+use crate::mtp_file::MtpFileType;
 use crate::safe_copy::{CopyOutcome, copy_reader_verified};
 use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -21,6 +24,9 @@ impl MtpWorker {
     pub fn send(&self, request: super::MtpRequest) -> Result<()> {
         self.0.send(request)
     }
+    pub fn recv(&self) -> Result<MtpEvent> {
+        self.0.recv()
+    }
     pub fn try_recv(&self) -> Option<MtpEvent> {
         self.0.try_recv()
     }
@@ -30,6 +36,7 @@ impl MtpWorker {
 struct WorkerState {
     provider: Option<Provider>,
     session: Option<PrivateSession>,
+    legacy_session: Option<LegacySession>,
 }
 
 struct PrivateSession {
@@ -37,6 +44,11 @@ struct PrivateSession {
     public: RemoteSession,
     objects: HashMap<String, Object>,
     cache_directory: PathBuf,
+}
+
+struct LegacySession {
+    _device: Device,
+    objects: HashMap<String, Object>,
 }
 
 impl WorkerState {
@@ -306,6 +318,143 @@ impl WorkerState {
     }
 }
 
+impl WorkerState {
+    fn list_files(
+        &mut self,
+        device_id: &str,
+        path: Option<&str>,
+        events: &mut super::EventSink<'_>,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<MtpFileInfo>> {
+        self.session = None;
+        self.legacy_session = None;
+        let device = self.open_device(device_id)?;
+        let root = device
+            .content()
+            .wrap_err("failed to access MTP device content")?
+            .root()
+            .wrap_err("failed to access MTP device root")?;
+        let source = match path {
+            Some(path) if !path.trim_matches(['/', '\\']).is_empty() => root
+                .object_by_path(std::path::Path::new(&normalize_source_path(path)?))
+                .wrap_err_with(|| format!("failed to find MTP path {path:?}"))?,
+            _ => root,
+        };
+        let root_path = path.unwrap_or_default().trim_matches(['/', '\\']);
+        let mut files = Vec::new();
+        let mut objects = HashMap::new();
+        let mut progress = 0;
+        collect_legacy_files(
+            source,
+            root_path,
+            &mut files,
+            &mut objects,
+            cancel,
+            events,
+            &mut progress,
+        )?;
+        files.sort_by(|left, right| {
+            left.file_type
+                .copy_order()
+                .cmp(&right.file_type.copy_order())
+                .then(left.name.cmp(&right.name))
+        });
+        self.legacy_session = Some(LegacySession {
+            _device: device,
+            objects,
+        });
+        Ok(files)
+    }
+
+    fn copy_files(
+        &mut self,
+        files: Vec<MtpCopyItem>,
+        keep_going: bool,
+        events: &mut super::EventSink<'_>,
+        cancel: &AtomicBool,
+    ) -> Result<MtpEvent> {
+        let session = self
+            .legacy_session
+            .as_ref()
+            .ok_or_else(|| eyre!("list MTP files before copying"))?;
+        let total_bytes = files.iter().map(|file| file.size).sum();
+        let mut completed_bytes = 0;
+        let mut copied_files = 0;
+        let mut skipped_files = 0;
+        let mut copied_bytes = 0;
+        let mut errors = Vec::new();
+
+        for file in files {
+            check_cancelled(cancel)?;
+            send_progress(
+                events,
+                cancel,
+                "copy files",
+                completed_bytes,
+                Some(total_bytes),
+                format!(
+                    "Copying {} to {}",
+                    file.source_path,
+                    file.destination.display()
+                ),
+            )?;
+            let result = (|| {
+                let object = session.objects.get(&file.object_id).ok_or_else(|| {
+                    eyre!("MTP object {:?} is no longer retained", file.object_id)
+                })?;
+                let mut input = object
+                    .open_read_stream()
+                    .wrap_err_with(|| format!("failed to read {}", file.source_path))?;
+                let mut last_reported = 0;
+                crate::safe_copy::copy_reader_with_progress(
+                    &mut input,
+                    file.size,
+                    &file.destination,
+                    &file.source_path,
+                    |bytes| {
+                        check_cancelled(cancel)?;
+                        if bytes != file.size && bytes.saturating_sub(last_reported) < (1024 * 1024)
+                        {
+                            return Ok(());
+                        }
+                        last_reported = bytes;
+                        send_progress(
+                            events,
+                            cancel,
+                            "copy files",
+                            completed_bytes + bytes,
+                            Some(total_bytes),
+                            file.source_path.clone(),
+                        )
+                    },
+                )
+            })();
+            match result {
+                Ok(CopyOutcome::Copied) => {
+                    copied_files += 1;
+                    copied_bytes += file.size;
+                }
+                Ok(CopyOutcome::SkippedExisting) => skipped_files += 1,
+                Err(error) if is_cancelled(&error) => return Err(error),
+                Err(error) if keep_going => errors.push(MtpCopyError {
+                    source_path: file.source_path,
+                    message: format!("{error:#}"),
+                }),
+                Err(error) => return Err(error),
+            }
+            completed_bytes += file.size;
+        }
+
+        Ok(MtpEvent::CopyFinished(MtpCopyResult {
+            copied_files,
+            skipped_files,
+            copied_bytes,
+            total_bytes,
+            errors,
+        }))
+    }
+}
+
 impl super::runtime::Backend for WorkerState {
     fn devices(&mut self) -> Result<Vec<MtpDevice>> {
         self.list_devices()
@@ -339,7 +488,26 @@ impl super::runtime::Backend for WorkerState {
     ) -> Result<MtpEvent> {
         self.import_assets(ids, destinations, progress, cancel)
     }
+    fn files(
+        &mut self,
+        device: &str,
+        path: Option<&str>,
+        events: &mut super::EventSink<'_>,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<MtpFileInfo>> {
+        self.list_files(device, path, events, cancel)
+    }
+    fn copy(
+        &mut self,
+        files: Vec<MtpCopyItem>,
+        keep_going: bool,
+        events: &mut super::EventSink<'_>,
+        cancel: &AtomicBool,
+    ) -> Result<MtpEvent> {
+        self.copy_files(files, keep_going, events, cancel)
+    }
     fn close(&mut self) {
+        self.legacy_session = None;
         self.session = None;
     }
 }
@@ -464,4 +632,51 @@ fn join_remote_path(parent: &str, name: &str) -> String {
     } else {
         format!("{parent}/{name}")
     }
+}
+
+fn collect_legacy_files(
+    container: Object,
+    parent_path: &str,
+    files: &mut Vec<MtpFileInfo>,
+    objects: &mut HashMap<String, Object>,
+    cancel: &AtomicBool,
+    events: &mut super::EventSink<'_>,
+    progress: &mut u64,
+) -> Result<()> {
+    check_cancelled(cancel)?;
+    for child in container
+        .children()
+        .wrap_err("failed to enumerate MTP objects")?
+    {
+        check_cancelled(cancel)?;
+        let name = child.name().to_string_lossy();
+        let path = join_remote_path(parent_path, &name);
+        if child.object_type() == ObjectType::Folder {
+            collect_legacy_files(child, &path, files, objects, cancel, events, progress)?;
+            continue;
+        }
+        if !child.object_type().is_file_like() {
+            continue;
+        }
+        let Ok(file_type) = MtpFileType::try_from_file_name(&name) else {
+            continue;
+        };
+        let size = child
+            .properties(&[WPD_OBJECT_SIZE])
+            .wrap_err_with(|| format!("failed to read metadata for {path}"))?
+            .get_u64(&WPD_OBJECT_SIZE)
+            .wrap_err_with(|| format!("failed to read 64-bit file size for {path}"))?;
+        let object_id = child.id().to_string_lossy();
+        objects.insert(object_id.clone(), child);
+        files.push(MtpFileInfo {
+            object_id,
+            name,
+            path: path.clone(),
+            file_type,
+            size,
+        });
+        *progress += 1;
+        send_progress(events, cancel, "list files", *progress, None, path)?;
+    }
+    Ok(())
 }

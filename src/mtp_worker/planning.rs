@@ -1,5 +1,6 @@
 use super::{RemoteAsset, RemoteShot};
 use chrono::NaiveDate;
+use color_eyre::eyre::{Result, eyre};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
@@ -42,6 +43,20 @@ pub fn classify_media_name(name: &str) -> Option<(String, MtpMediaKind)> {
         _ => return None,
     };
     Some((stem.to_owned(), kind))
+}
+
+pub(crate) fn normalize_source_path(path: &str) -> Result<PathBuf> {
+    let normalized = path.trim_start_matches(['/', '\\']);
+    let path = PathBuf::from(normalized);
+    if path
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+    {
+        return Err(eyre!(
+            "MTP source path must be a relative path without '..'"
+        ));
+    }
+    Ok(path)
 }
 
 pub(crate) fn plan_import(

@@ -31,6 +31,24 @@ pub(super) trait Backend {
         progress: &mut dyn FnMut(String, u64, u64),
         cancel: &AtomicBool,
     ) -> Result<MtpEvent>;
+    fn files(
+        &mut self,
+        _device: &str,
+        _path: Option<&str>,
+        _events: &mut super::EventSink<'_>,
+        _cancel: &AtomicBool,
+    ) -> Result<Vec<super::MtpFileInfo>> {
+        Err(eyre!("file listing unsupported"))
+    }
+    fn copy(
+        &mut self,
+        _files: Vec<super::MtpCopyItem>,
+        _keep_going: bool,
+        _events: &mut super::EventSink<'_>,
+        _cancel: &AtomicBool,
+    ) -> Result<MtpEvent> {
+        Err(eyre!("CLI copying unsupported"))
+    }
     fn close(&mut self);
 }
 struct Request {
@@ -84,7 +102,10 @@ impl Worker {
         }
         if matches!(
             request,
-            MtpRequest::ImportAssets { .. } | MtpRequest::StartSession { .. }
+            MtpRequest::ImportAssets { .. }
+                | MtpRequest::StartSession { .. }
+                | MtpRequest::ListFiles { .. }
+                | MtpRequest::CopyFiles { .. }
         ) {
             self.cancel.store(false, Ordering::Relaxed);
         }
@@ -94,6 +115,17 @@ impl Worker {
                 request,
             })
             .map_err(|_| eyre!("MTP worker stopped"))
+    }
+    pub fn recv(&self) -> Result<MtpEvent> {
+        loop {
+            let event = self
+                .receiver
+                .recv()
+                .map_err(|_| eyre!("MTP worker stopped"))?;
+            if event.generation == self.generation.load(Ordering::Relaxed) {
+                return Ok(event.event);
+            }
+        }
     }
     pub fn try_recv(&self) -> Option<MtpEvent> {
         while let Ok(event) = self.receiver.try_recv() {
@@ -237,6 +269,29 @@ fn run<B: Backend>(
                         "import",
                         backend
                             .import(object_ids, destinations, &mut progress, &cancel)
+                            .map(Some),
+                    )
+                }
+                MtpRequest::ListFiles { device_id, path } => {
+                    paused = true;
+                    (
+                        "list files",
+                        backend
+                            .files(
+                                &device_id,
+                                path.as_deref(),
+                                &mut |event| send(event),
+                                &cancel,
+                            )
+                            .map(|files| Some(MtpEvent::FilesListed(files))),
+                    )
+                }
+                MtpRequest::CopyFiles { files, keep_going } => {
+                    paused = true;
+                    (
+                        "copy files",
+                        backend
+                            .copy(files, keep_going, &mut |event| send(event), &cancel)
                             .map(Some),
                     )
                 }
@@ -459,9 +514,110 @@ mod tests {
                 skipped_existing: 0,
             })
         }
+        fn files(
+            &mut self,
+            device: &str,
+            path: Option<&str>,
+            events: &mut super::super::EventSink<'_>,
+            cancel: &AtomicBool,
+        ) -> Result<Vec<super::super::MtpFileInfo>> {
+            assert_eq!(device, "camera");
+            assert_eq!(path, Some("DCIM"));
+            super::super::send_progress(events, cancel, "list files", 1, None, "DCIM/photo.jpg")?;
+            Ok(vec![super::super::MtpFileInfo {
+                object_id: "photo".into(),
+                name: "photo.jpg".into(),
+                path: "DCIM/photo.jpg".into(),
+                file_type: crate::mtp_file::MtpFileType::Image,
+                size: 3,
+            }])
+        }
+        fn copy(
+            &mut self,
+            files: Vec<super::super::MtpCopyItem>,
+            _: bool,
+            events: &mut super::super::EventSink<'_>,
+            cancel: &AtomicBool,
+        ) -> Result<MtpEvent> {
+            let mut copied = 0;
+            let mut skipped = 0;
+            for file in files {
+                assert_eq!(file.object_id, "photo");
+                let outcome = crate::safe_copy::copy_reader_with_progress(
+                    &mut b"abc".as_slice(),
+                    file.size,
+                    &file.destination,
+                    &file.source_path,
+                    |done| {
+                        super::super::send_progress(
+                            events,
+                            cancel,
+                            "copy files",
+                            done,
+                            Some(file.size),
+                            &file.source_path,
+                        )
+                    },
+                )?;
+                match outcome {
+                    crate::safe_copy::CopyOutcome::Copied => copied += 1,
+                    crate::safe_copy::CopyOutcome::SkippedExisting => skipped += 1,
+                }
+            }
+            Ok(MtpEvent::CopyFinished(super::super::MtpCopyResult {
+                copied_files: copied,
+                skipped_files: skipped,
+                copied_bytes: copied as u64 * 3,
+                total_bytes: 3,
+                errors: vec![],
+            }))
+        }
         fn close(&mut self) {
             self.session = None;
         }
+    }
+    #[test]
+    fn cli_requests_deliver_progress_and_copy_results_without_background_staging() {
+        let (worker, _, _, previews) = fixture();
+        worker
+            .send(MtpRequest::ListFiles {
+                device_id: "camera".into(),
+                path: Some("DCIM".into()),
+            })
+            .unwrap();
+        assert!(matches!(
+            worker.recv().unwrap(),
+            MtpEvent::Progress { done: 1, .. }
+        ));
+        let MtpEvent::FilesListed(files) = worker.recv().unwrap() else {
+            panic!("missing file listing")
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("photo.jpg");
+        let file = &files[0];
+        let item = super::super::MtpCopyItem {
+            object_id: file.object_id.clone(),
+            source_path: file.path.clone(),
+            size: file.size,
+            destination: destination.clone(),
+        };
+        for retry in [false, true] {
+            worker
+                .send(MtpRequest::CopyFiles {
+                    files: vec![item.clone()],
+                    keep_going: false,
+                })
+                .unwrap();
+            let MtpEvent::CopyFinished(result) =
+                until(&worker, |e| matches!(e, MtpEvent::CopyFinished(_)))
+            else {
+                panic!("missing copy result")
+            };
+            assert_eq!(result.copied_files, usize::from(!retry));
+            assert_eq!(result.skipped_files, usize::from(retry));
+            assert_eq!(std::fs::read(&destination).unwrap(), b"abc");
+        }
+        assert!(previews.try_recv().is_err());
     }
     fn fixture() -> (Worker, Receiver<String>, Sender<()>, Receiver<String>) {
         let (started, start) = mpsc::channel();
