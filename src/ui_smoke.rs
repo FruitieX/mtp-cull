@@ -433,9 +433,161 @@ impl Smoke {
                 self.step = 20;
             }
             20 => {
+                app.settings_open = false;
+                std::fs::write(
+                    self.root.join("bottom-height.txt"),
+                    app.settings.reel_height.to_string(),
+                )?;
+                app.set_reel_position(Position::Left);
+                app.selected = 80;
+                app.reel_selection.single(80);
+                self.step = 42;
+            }
+            42 => {
+                if app.reel_layout.unwrap().0 != 1 || app.reel_panel_bounds.left().abs() > 2.0 {
+                    bail!("left strip did not use one column at the left edge");
+                }
+                self.key(egui::Key::ArrowDown, egui::Modifiers::NONE);
+                self.step = 43;
+            }
+            43 => {
+                if app.selected != 81
+                    || app.reel_viewport.min.y <= 0.0
+                    || !app
+                        .reel_cells
+                        .iter()
+                        .any(|(i, r)| *i == 81 && app.reel_clip.contains(r.center()))
+                {
+                    bail!(
+                        "left strip did not follow Down: {} / {:?}",
+                        app.selected,
+                        app.reel_viewport
+                    );
+                }
+                self.capture(ctx, "reel-left-strip");
+                self.key(egui::Key::G, egui::Modifiers::CTRL | egui::Modifiers::SHIFT);
+                self.step = 44;
+            }
+            44 => {
+                if app.settings.reel_position != Position::Right
+                    || (app.reel_panel_bounds.right() - ctx.content_rect().right()).abs() > 2.0
+                    || !app
+                        .reel_cells
+                        .iter()
+                        .any(|(i, r)| *i == 81 && app.reel_clip.contains(r.center()))
+                {
+                    bail!("placement shortcut did not move/follow into right strip");
+                }
+                self.capture(ctx, "reel-right-strip");
+                std::fs::write(
+                    self.root.join("scroll-before.txt"),
+                    app.reel_viewport.min.y.to_string(),
+                )?;
+                self.input.extend([
+                    egui::Event::PointerMoved(app.reel_clip.center()),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        phase: egui::TouchPhase::Move,
+                        delta: egui::vec2(0.0, -120.0),
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                self.step = 45;
+            }
+            45 => {
+                let before =
+                    std::fs::read_to_string(self.root.join("scroll-before.txt"))?.parse::<f32>()?;
+                if app.reel_viewport.min.y <= before {
+                    bail!("normal wheel did not scroll side strip vertically");
+                }
+                std::fs::write(
+                    self.root.join("width-before.txt"),
+                    app.settings.reel_width.to_string(),
+                )?;
+                let edge = app.reel_panel_bounds.left_center();
+                self.input.extend([
+                    egui::Event::PointerMoved(edge),
+                    egui::Event::PointerButton {
+                        pos: edge,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                self.step = 46;
+            }
+            46 => {
+                let pos = ctx.input(|i| i.pointer.latest_pos()).unwrap() - egui::vec2(80.0, 0.0);
+                self.input.push(egui::Event::PointerMoved(pos));
+                self.step = 47;
+            }
+            47 => {
+                let pos = ctx.input(|i| i.pointer.latest_pos()).unwrap();
+                self.input.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                self.step = 48;
+            }
+            48 => {
+                let before =
+                    std::fs::read_to_string(self.root.join("width-before.txt"))?.parse::<f32>()?;
+                if app.settings.reel_width <= before + 20.0 {
+                    bail!("side panel edge did not resize reel");
+                }
+                self.key(egui::Key::G, ctrl);
+                self.step = 49;
+            }
+            49 => {
+                let columns = app.reel_layout.unwrap().0;
+                if !app.settings.reel_grid || columns < 2 {
+                    bail!("side grid did not form multiple columns");
+                }
+                self.key(egui::Key::ArrowDown, egui::Modifiers::NONE);
+                self.step = 50;
+            }
+            50 => {
+                let columns = app.reel_layout.unwrap().0;
+                if app.selected != 81 + columns
+                    || !app
+                        .reel_cells
+                        .iter()
+                        .any(|(i, r)| *i == app.selected && app.reel_clip.contains(r.center()))
+                {
+                    bail!("side grid did not navigate/follow by column count");
+                }
+                self.capture(ctx, "reel-right-grid");
+                self.key(egui::Key::G, egui::Modifiers::CTRL | egui::Modifiers::SHIFT);
+                self.step = 51;
+            }
+            51 => {
+                let height =
+                    std::fs::read_to_string(self.root.join("bottom-height.txt"))?.parse::<f32>()?;
+                if app.settings.reel_position != Position::Bottom
+                    || (app.settings.reel_height - height).abs() > 2.0
+                {
+                    bail!("returning to bottom lost its independent height");
+                }
+                std::fs::write(
+                    self.root.join("side-width.txt"),
+                    app.settings.reel_width.to_string(),
+                )?;
+                self.key(egui::Key::G, egui::Modifiers::CTRL | egui::Modifiers::SHIFT);
+                self.step = 52;
+            }
+            52 => {
+                let width =
+                    std::fs::read_to_string(self.root.join("side-width.txt"))?.parse::<f32>()?;
+                if app.settings.reel_position != Position::Left
+                    || (app.settings.reel_width - width).abs() > 2.0
+                {
+                    bail!("left/right did not share the resized sidebar width");
+                }
                 std::fs::write(
                     self.root.join("PASS.txt"),
-                    "PASS: synthetic 500-photo reel; keyboard-follow in row/grid; Up/Down row navigation; Ctrl-click batch; Ctrl+A selection; 1/0 batch decisions; thumbnail and canvas context actions; normal-wheel scrolling; native panel resize; GPU checkerboard low-pass readback.\n",
+                    "PASS: synthetic 500-photo reel; keyboard-follow in row/grid and left/right strips; Up/Down row navigation; Ctrl-click batch; Ctrl+A selection; 1/0 batch decisions; context actions; normal-wheel scrolling; bottom/side panel resize; placement shortcut; independent bottom height; GPU checkerboard low-pass readback.\n",
                 )?;
                 self.step = 255;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);

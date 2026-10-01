@@ -66,6 +66,7 @@ pub enum Command {
     DeselectAll,
     ToggleReelSelection,
     ReelMode,
+    ReelPosition,
     Import,
     Presets,
     Settings,
@@ -320,7 +321,7 @@ pub const COMMANDS: &[Spec] = &[
     Spec {
         command: Command::Zoom,
         id: "zoom",
-        label: "Fit / native 100%",
+        label: "Fit / 100% zoom",
         key: "Z",
     },
     Spec {
@@ -464,8 +465,14 @@ pub const COMMANDS: &[Spec] = &[
     Spec {
         command: Command::ReelMode,
         id: "reel_mode",
-        label: "Toggle reel row / grid",
+        label: "Toggle reel strip / grid",
         key: "Ctrl+G",
+    },
+    Spec {
+        command: Command::ReelPosition,
+        id: "reel_position",
+        label: "Move reel: Bottom / Left / Right",
+        key: "Ctrl+Shift+G",
     },
     Spec {
         command: Command::Import,

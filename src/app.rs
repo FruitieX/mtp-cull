@@ -4,6 +4,7 @@ use crate::imports::{ImportOperation, ImportUpdate};
 use crate::mtp_worker::{ImportPaths, MtpDevice, MtpEvent, MtpRequest, MtpWorker, SourceFolder};
 use crate::quick_import;
 use crate::recent_sources::{self, RecentSource};
+use crate::reel::Position;
 use crate::review::{self, Decision, History, Kind, Session, Settings, Source};
 use crate::review_commands::{self, COMMANDS, Command};
 use crate::review_store::{SavedReview, Store};
@@ -414,6 +415,13 @@ impl App {
             }
         }
     }
+    fn set_reel_position(&mut self, position: Position) {
+        self.settings.reel_position = position;
+        self.draft_settings.reel_position = position;
+        self.reel_layout = None;
+        self.reel_follow = true;
+        self.store.save_settings(&self.settings);
+    }
     fn decide(&mut self, decision: Decision, bulk: bool) {
         if self.visible.is_empty() {
             return;
@@ -755,6 +763,7 @@ impl App {
                 self.reel_follow = true;
                 self.store.save_settings(&self.settings);
             }
+            Command::ReelPosition => self.set_reel_position(self.settings.reel_position.next()),
             Command::Import => {
                 if self.import.is_none() && !self.camera_busy && self.loader.is_none() {
                     self.import_open = true;
@@ -1648,101 +1657,129 @@ impl App {
             });
         });
     }
-    fn filters(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            theme::group(ui, |ui| {
-                for (kind, label) in [
-                    (Some(Kind::Jpeg), "JPEG"),
-                    (Some(Kind::Raw), "RAW"),
-                    (Some(Kind::Video), "Video"),
-                    (None, "All"),
-                ] {
-                    if theme::tab(ui, self.media_filter == kind, label).clicked() {
-                        self.media_filter = kind;
-                        self.refresh_visible();
-                    }
-                }
+    fn filters(&mut self, ui: &mut egui::Ui, position: Position) {
+        if position.is_side() {
+            ui.horizontal(|ui| self.media_filters(ui));
+            ui.horizontal_wrapped(|ui| {
+                self.decision_filter_control(ui);
+                self.reel_layout_controls(ui, position);
             });
-            let before = self.decision_filter;
-            egui::ComboBox::from_id_salt("decision-filter")
-                .selected_text(match self.decision_filter {
-                    None => "All decisions",
-                    Some(Decision::Keep) => "Kept",
-                    Some(Decision::Reject) => "Rejected",
-                    Some(Decision::Unreviewed) => "Unreviewed",
-                })
-                .width(125.0)
-                .show_ui(ui, |ui| {
-                    for (filter, label) in [
-                        (None, "All decisions"),
-                        (Some(Decision::Unreviewed), "Unreviewed"),
-                        (Some(Decision::Keep), "Kept"),
-                        (Some(Decision::Reject), "Rejected"),
-                    ] {
-                        ui.selectable_value(&mut self.decision_filter, filter, label);
-                    }
+            ui.horizontal_wrapped(|ui| self.reel_counts(ui));
+        } else {
+            ui.horizontal(|ui| {
+                self.media_filters(ui);
+                self.decision_filter_control(ui);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.reel_layout_controls(ui, position);
+                    self.reel_counts(ui);
                 });
-            if self.decision_filter != before {
-                self.refresh_visible();
+            });
+        }
+    }
+    fn media_filters(&mut self, ui: &mut egui::Ui) {
+        theme::group(ui, |ui| {
+            for (kind, label) in [
+                (Some(Kind::Jpeg), "JPEG"),
+                (Some(Kind::Raw), "RAW"),
+                (Some(Kind::Video), "Video"),
+                (None, "All"),
+            ] {
+                if theme::tab(ui, self.media_filter == kind, label).clicked() {
+                    self.media_filter = kind;
+                    self.refresh_visible();
+                }
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if theme::icon_button(
-                    ui,
-                    if self.settings.reel_grid {
-                        "Row"
-                    } else {
-                        "Grid"
-                    },
-                    if self.settings.reel_grid {
-                        theme::Icon::Row
-                    } else {
-                        theme::Icon::Grid
-                    },
-                )
-                .on_hover_text(self.button_text(
-                    "Switch between horizontal reel and vertical grid",
-                    Command::ReelMode,
-                ))
-                .clicked()
-                {
-                    self.command(Command::ReelMode);
-                }
-                if self.reel_selection.indices.len() > 1 {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{} selected",
-                            self.reel_selection.indices.len()
-                        ))
-                        .color(theme::SELECTED),
-                    );
-                }
-                let position = self
-                    .visible
-                    .iter()
-                    .position(|i| *i == self.selected)
-                    .map_or(0, |p| p + 1);
-                ui.label(
-                    egui::RichText::new(format!("{position} / {}", self.visible.len()))
-                        .color(theme::MUTED),
-                );
-                if let Some(session) = &self.session {
-                    let kept = session
-                        .shots
-                        .iter()
-                        .filter(|shot| {
-                            shot.decision(
-                                shot.review_kind(self.media_filter),
-                                self.settings.link_raw,
-                            ) == Decision::Keep
-                        })
-                        .count();
-                    ui.label(
-                        egui::RichText::new(format!("{kept} kept"))
-                            .color(theme::DecisionPalette::new(self.settings.colourblind).keep),
-                    );
+        });
+    }
+    fn decision_filter_control(&mut self, ui: &mut egui::Ui) {
+        let before = self.decision_filter;
+        egui::ComboBox::from_id_salt("decision-filter")
+            .selected_text(match self.decision_filter {
+                None => "All decisions",
+                Some(Decision::Keep) => "Kept",
+                Some(Decision::Reject) => "Rejected",
+                Some(Decision::Unreviewed) => "Unreviewed",
+            })
+            .width(125.0)
+            .show_ui(ui, |ui| {
+                for (filter, label) in [
+                    (None, "All decisions"),
+                    (Some(Decision::Unreviewed), "Unreviewed"),
+                    (Some(Decision::Keep), "Kept"),
+                    (Some(Decision::Reject), "Rejected"),
+                ] {
+                    ui.selectable_value(&mut self.decision_filter, filter, label);
                 }
             });
-        });
+        if self.decision_filter != before {
+            self.refresh_visible();
+        }
+    }
+    fn reel_layout_controls(&mut self, ui: &mut egui::Ui, position: Position) {
+        if theme::icon_button(
+            ui,
+            if !self.settings.reel_grid {
+                "Grid"
+            } else if position.is_side() {
+                "Strip"
+            } else {
+                "Row"
+            },
+            if self.settings.reel_grid {
+                theme::Icon::Row
+            } else {
+                theme::Icon::Grid
+            },
+        )
+        .on_hover_text(
+            self.button_text("Switch between a single strip and grid", Command::ReelMode),
+        )
+        .clicked()
+        {
+            self.command(Command::ReelMode);
+        }
+        ui.menu_button("Reel", |ui| {
+            ui.label("Position");
+            for next in Position::ALL {
+                if ui
+                    .selectable_label(self.settings.reel_position == next, next.label())
+                    .clicked()
+                {
+                    self.set_reel_position(next);
+                    ui.close();
+                }
+            }
+        })
+        .response
+        .on_hover_text(self.button_text("Move reel", Command::ReelPosition));
+    }
+    fn reel_counts(&self, ui: &mut egui::Ui) {
+        let palette = theme::DecisionPalette::new(self.settings.colourblind);
+        if self.reel_selection.indices.len() > 1 {
+            ui.label(
+                egui::RichText::new(format!("{} selected", self.reel_selection.indices.len()))
+                    .color(palette.selection),
+            );
+        }
+        let position = self
+            .visible
+            .iter()
+            .position(|i| *i == self.selected)
+            .map_or(0, |p| p + 1);
+        ui.label(
+            egui::RichText::new(format!("{position} / {}", self.visible.len())).color(theme::MUTED),
+        );
+        if let Some(session) = &self.session {
+            let kept = session
+                .shots
+                .iter()
+                .filter(|shot| {
+                    shot.decision(shot.review_kind(self.media_filter), self.settings.link_raw)
+                        == Decision::Keep
+                })
+                .count();
+            ui.label(egui::RichText::new(format!("{kept} kept")).color(palette.keep));
+        }
     }
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         if !self.camera_busy
@@ -1925,10 +1962,20 @@ impl App {
                                     ui.add(egui::Slider::new(&mut self.draft_settings.burst_distance, 0..=32).text("Similarity distance"));
                                     ui.separator();
                                     ui.label(egui::RichText::new("Film reel").strong());
-                                    ui.checkbox(&mut self.draft_settings.reel_grid, "Show a grid instead of one row");
+                                    ui.horizontal(|ui| {
+                                        ui.label("Position");
+                                        egui::ComboBox::from_id_salt("reel-position-setting")
+                                            .selected_text(self.draft_settings.reel_position.label())
+                                            .show_ui(ui, |ui| {
+                                                for position in Position::ALL {
+                                                    ui.selectable_value(&mut self.draft_settings.reel_position, position, position.label());
+                                                }
+                                            });
+                                    });
+                                    ui.checkbox(&mut self.draft_settings.reel_grid, "Show a grid instead of a single strip");
                                     ui.add(egui::Slider::new(&mut self.draft_settings.reel_thumbnail_size, 100.0..=300.0).text("Grid thumbnail width"));
                                     ui.add(egui::Slider::new(&mut self.draft_settings.reel_scroll_speed, 0.25..=8.0).text("Reel scroll speed"));
-                                    ui.label(egui::RichText::new("Drag the reel's top edge to resize. Wheel scrolls the row left/right; Shift is optional. Ctrl-click selects a batch; Shift-click selects a range.").small().color(theme::MUTED));
+                                    ui.label(egui::RichText::new("Drag the edge beside the viewer to resize. The single strip scrolls horizontally at the bottom and vertically at either side. Ctrl-click selects a batch; Shift-click selects a range.").small().color(theme::MUTED));
                                     if let Some(session) = &self.session {
                                         ui.label(egui::RichText::new(format!("{} assets selected for import with these settings", session.selected_ids(&self.draft_settings).len())).small().color(theme::MUTED));
                                     }
@@ -1989,7 +2036,7 @@ impl App {
                 ui.label("Wheel: zoom at cursor · Drag: shared pan · Alt+drag B: manual alignment");
                 ui.label("Pin A, browse B; Tab selects which pane receives Keep/Reject.");
                 ui.label("Ctrl-click reel thumbnails for a batch; Shift-click for a range. Ctrl+A selects visible images. Keep/Reject/Unreviewed apply to the batch, or to pinned A when A is active.");
-                ui.label("Drag the reel's top edge to resize; Ctrl+G switches row/grid. Wheel scrolls the reel without Shift. Scroll speed is in Settings > Review; sampling is in Settings > Performance.");
+                ui.label("Drag the reel edge to resize; Ctrl+G switches strip/grid. Ctrl+Shift+G cycles Bottom/Left/Right placement. Wheel scrolls the reel without Shift. Settings > Review sets placement and scroll speed; Performance sets sampling.");
                 ui.label("Region mode: drag a crop. Focus scores are hints, not automatic decisions.");
                 egui::ScrollArea::vertical().max_height(500.0).show(ui,|ui|{
                     for spec in COMMANDS{ui.horizontal(|ui|{ui.monospace(self.settings.bindings.get(spec.id).map_or(spec.key,String::as_str));ui.label(spec.label);});}
@@ -2374,28 +2421,58 @@ impl eframe::App for App {
             .frame(theme::panel().inner_margin(egui::Margin::symmetric(14, 4)))
             .show(ui, |ui| self.status_bar(ui));
         if self.session.is_some() {
-            let reel_panel = egui::Panel::bottom("filmstrip")
-                .resizable(true)
-                .default_size(self.settings.reel_height)
-                .size_range(155.0..=(ctx.content_rect().height() * 0.6).max(155.0))
-                .frame(theme::panel())
-                .show(ui, |ui| {
-                    ui.add_space(3.0);
-                    self.filters(ui);
-                    ui.add_space(3.0);
-                    self.filmstrip(ui);
-                });
-            self.settings.reel_height = reel_panel.response.rect.height();
-            let grip = reel_panel.response.rect.center_top() + egui::vec2(0.0, 1.5);
+            // Keep this frame's orientation stable if the placement menu changes it.
+            let position = self.settings.reel_position;
+            let side = position.is_side();
+            // Left/right share a width; bottom keeps its own height and panel state.
+            let id = egui::Id::new(("filmstrip", side));
+            let panel = match position {
+                Position::Bottom => egui::Panel::bottom(id)
+                    .default_size(self.settings.reel_height)
+                    .size_range(155.0..=(ctx.content_rect().height() * 0.6).max(155.0)),
+                Position::Left => egui::Panel::left(id)
+                    .default_size(self.settings.reel_width)
+                    .size_range(260.0..=(ctx.content_rect().width() * 0.5).max(260.0)),
+                Position::Right => egui::Panel::right(id)
+                    .default_size(self.settings.reel_width)
+                    .size_range(260.0..=(ctx.content_rect().width() * 0.5).max(260.0)),
+            };
+            let reel_panel = panel.resizable(true).frame(theme::panel()).show(ui, |ui| {
+                ui.add_space(3.0);
+                self.filters(ui, position);
+                ui.add_space(3.0);
+                self.filmstrip(ui, position);
+            });
+            let rect = reel_panel.response.rect;
+            let (grip, delta) = match position {
+                Position::Bottom => (
+                    rect.center_top() + egui::vec2(0.0, 1.5),
+                    egui::vec2(15.0, 0.0),
+                ),
+                Position::Left => (
+                    rect.right_center() - egui::vec2(1.5, 0.0),
+                    egui::vec2(0.0, 15.0),
+                ),
+                Position::Right => (
+                    rect.left_center() + egui::vec2(1.5, 0.0),
+                    egui::vec2(0.0, 15.0),
+                ),
+            };
             ui.painter().line_segment(
-                [grip - egui::vec2(15.0, 0.0), grip + egui::vec2(15.0, 0.0)],
+                [grip - delta, grip + delta],
                 egui::Stroke::new(2.0, theme::MUTED),
             );
             #[cfg(feature = "ui-smoke")]
             {
-                self.reel_panel_bounds = reel_panel.response.rect;
+                self.reel_panel_bounds = rect;
             }
-            self.draft_settings.reel_height = self.settings.reel_height;
+            if side {
+                self.settings.reel_width = rect.width();
+                self.draft_settings.reel_width = self.settings.reel_width;
+            } else {
+                self.settings.reel_height = rect.height();
+                self.draft_settings.reel_height = self.settings.reel_height;
+            }
             if ctx.input(|i| i.pointer.any_released()) {
                 self.store.save_settings(&self.settings);
             }

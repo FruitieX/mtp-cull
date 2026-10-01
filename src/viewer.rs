@@ -580,12 +580,11 @@ impl Canvas {
             }
         }
         let mut text = format!("{label} · {} · {}", image.name, image.status_label);
-        if self.native() {
-            text.push_str(if native_ready {
-                " · native detail"
-            } else {
-                " · native detail loading"
-            });
+        if let Some(zoom) = self.viewport.zoom {
+            text.push_str(&format!(" · {:.0}%", zoom * 100.0));
+        }
+        if self.native() && !native_ready {
+            text.push_str(" · Loading full-resolution image…");
         }
         if let Some(region) = self.region {
             let region = region.translate(alignment);

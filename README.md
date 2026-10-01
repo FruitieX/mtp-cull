@@ -86,16 +86,20 @@ Filtering drops hidden photos from the editing selection. When comparison pane A
 is active, decision commands apply to A instead of the reel batch. Import still
 copies all Keep decisions, independently of the current editing selection.
 
-Drag the reel's top edge to resize it; row previews grow with the panel. **Grid**
-(Ctrl+G) switches to multiple rows with vertical scrolling; **Row** returns to
-horizontal scrolling. A normal wheel scrolls left/right in Row mode and up/down
-in Grid mode. Up/Down moves between grid rows in the same column (the last photo
-is used in an incomplete row); Left/Right moves one photo. Up/Down moves one photo
-when using a single row. Navigation stops at the top/bottom row.
-The reel follows keyboard navigation. Shift is optional when scrolling.
-Settings > Review adjusts reel scroll speed and
-grid thumbnail width. Layout and size preferences persist. Right-click a thumbnail
-for decision/selection/pin actions, or the canvas for decisions and viewing tools.
+Choose **Reel > Bottom / Left / Right** above the thumbnails to move the reel;
+**Ctrl+Shift+G** cycles the three positions. Settings > Review also controls placement.
+A single strip runs left/right at the bottom and top/bottom on either side.
+Drag its edge facing the viewer to resize it; strip thumbnails grow with the panel.
+**Grid** (Ctrl+G) switches to a grid with vertical scrolling; **Row** (bottom) or
+**Strip** (side) returns to a single strip. A normal wheel scrolls along the strip,
+or vertically in a grid; Shift is optional. Up/Down moves between grid rows in
+the same column (the last photo is used in an incomplete row); Left/Right moves
+one photo. Up/Down moves one photo in a single strip. Navigation stops at the
+first/last row, and the reel follows the active photo.
+Settings > Review adjusts scroll speed and grid thumbnail width.
+Placement, bottom height, sidebar width and layout preferences persist.
+Right-click a thumbnail for decision/selection/pin actions, or the canvas for
+decisions and viewing tools.
 
 Settings > Performance offers **Smooth (mipmaps)**, **Linear** and **Nearest
 neighbor** image sampling. Smooth is the default and reduces zoomed-out moiré with
@@ -174,7 +178,8 @@ the command palette. Tab/Enter/Space also operate focused UI controls.
 | Unreviewed / kept / rejected / all decisions | U / K / X / Shift+A |
 | Select all visible / clear reel selection | Ctrl+A / Ctrl+Shift+A |
 | Toggle active photo in reel selection | Insert |
-| Row / grid reel | Ctrl+G |
+| Strip / grid reel | Ctrl+G |
+| Move reel: Bottom / Left / Right | Ctrl+Shift+G |
 | Keep / reject visible images | Ctrl+Shift+K / Ctrl+Backspace |
 | Burst grouping / previous-next burst | Ctrl+B / Ctrl+PageUp-PageDown |
 | Open folder / camera / import | Ctrl+O / Ctrl+M / Ctrl+I |

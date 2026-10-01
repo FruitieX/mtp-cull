@@ -1,6 +1,36 @@
 //! Reel selection is separate from review decisions and import choices.
 use std::collections::BTreeSet;
 
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub enum Position {
+    #[default]
+    Bottom,
+    Left,
+    Right,
+}
+impl Position {
+    pub const ALL: [Self; 3] = [Self::Bottom, Self::Left, Self::Right];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Bottom => "Bottom",
+            Self::Left => "Left",
+            Self::Right => "Right",
+        }
+    }
+    pub fn is_side(self) -> bool {
+        self != Self::Bottom
+    }
+    pub fn next(self) -> Self {
+        match self {
+            Self::Bottom => Self::Left,
+            Self::Left => Self::Right,
+            Self::Right => Self::Bottom,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Selection {
     pub indices: BTreeSet<usize>,
@@ -60,8 +90,8 @@ impl Layout {
             self.cell - eframe::egui::vec2(8.0, 8.0),
         )
     }
-    pub fn range(&self, viewport: eframe::egui::Rect, grid: bool) -> std::ops::Range<usize> {
-        if grid {
+    pub fn range(&self, viewport: eframe::egui::Rect, vertical: bool) -> std::ops::Range<usize> {
+        if vertical {
             let first = (viewport.top() / self.cell.y).floor().max(0.0) as usize * self.columns;
             let end = ((viewport.bottom() / self.cell.y).ceil() as usize + 1) * self.columns;
             first.min(self.count)..end.min(self.count)
@@ -120,5 +150,25 @@ mod tests {
             ),
             5..8
         );
+    }
+    #[test]
+    fn side_strip_virtualizes_one_column_in_photo_order() {
+        use eframe::egui::{Rect, pos2, vec2};
+        let strip = Layout {
+            columns: 1,
+            cell: vec2(240.0, 200.0),
+            count: 500,
+        };
+        assert_eq!(strip.rect(80).min, pos2(0.0, 16000.0));
+        assert_eq!(
+            strip.range(
+                Rect::from_min_size(pos2(0.0, 16000.0), vec2(240.0, 600.0)),
+                true
+            ),
+            80..84
+        );
+        assert_eq!(Position::Bottom.next(), Position::Left);
+        assert_eq!(Position::Left.next(), Position::Right);
+        assert_eq!(Position::Right.next(), Position::Bottom);
     }
 }

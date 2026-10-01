@@ -162,3 +162,8 @@ the full viewer/focus/import/retry/resume smoke also passes. See
 - [x] Explain import layout and release-build requirements; preserve staged originals and review choices.
 - [x] Cover grid boundaries, filtered order, preset semantics and GPU prefetch admission; verify native grid input and idle native comparison.
 - [x] Add persistent colourblind-friendly blue/orange/gray decision colours for viewer borders, reel cards and buttons, with distinct white editing-selection markers.
+
+- [x] Replace the viewer's ambiguous "native detail" caption with actual zoom percentage and an explicit full-resolution loading message.
+- [x] Dock the reel at Bottom/Left/Right, turn side strips vertical, and remember placement and separate height/width preferences.
+- [x] Add a placement menu and Ctrl+Shift+G shortcut; adapt filters, resizing, wheel scrolling and keyboard-follow to side strips and grids.
+- [x] Verify persisted settings and virtualized side strips; exercise actual docking shortcuts, side-grid navigation and panel resizing in the native renderer.

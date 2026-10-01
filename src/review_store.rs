@@ -254,6 +254,8 @@ mod tests {
             let store = Store::at(path.clone()).unwrap();
             store.save_settings(&Settings {
                 colourblind: true,
+                reel_position: crate::reel::Position::Right,
+                reel_width: 420.0,
                 recent_sources: sources.clone(),
                 ..Settings::default()
             });
@@ -262,6 +264,11 @@ mod tests {
             let store = Store::at(path.clone()).unwrap();
             assert_eq!(store.settings().unwrap().recent_sources, sources);
             assert!(store.settings().unwrap().colourblind);
+            assert_eq!(
+                store.settings().unwrap().reel_position,
+                crate::reel::Position::Right
+            );
+            assert_eq!(store.settings().unwrap().reel_width, 420.0);
         }
         // A pre-history settings record still loads its other preferences.
         connect(&path)
@@ -275,6 +282,8 @@ mod tests {
         let settings = store.settings().unwrap();
         assert!(settings.recent_sources.is_empty());
         assert!(!settings.colourblind);
+        assert_eq!(settings.reel_position, crate::reel::Position::Bottom);
+        assert_eq!(settings.reel_width, Settings::default().reel_width);
         assert!(settings.auto_advance);
     }
     #[test]

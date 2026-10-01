@@ -240,3 +240,10 @@ the SIMD release build; disk staging retains originals across launches, while
 decoded preview/thumbnail textures are recreated. A 1-2 GiB GPU cache can retain
 more native neighbors when GPU memory allows; the corrected budget check also
 works with the existing 512 MiB default.
+
+The reel smoke also exercises left/right vertical strips, Ctrl+Shift+G placement,
+side-grid arrow navigation, ordinary vertical wheel scrolling, and the actual
+sidebar resize edge. It verifies that the bottom height stays independent and
+that left/right share their resized width. The October docking checks ran on a
+1024x768 Windows desktop (larger requested windows were clamped to that display).
+Only visible strip/grid cells are drawn, including in a 500-photo session.

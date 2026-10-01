@@ -1,23 +1,31 @@
 use super::*;
 
 impl App {
-    pub(super) fn filmstrip(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn filmstrip(&mut self, ui: &mut egui::Ui, position: Position) {
         #[cfg(feature = "ui-smoke")]
         {
             self.reel_cells.clear();
             self.reel_menu_items.clear();
         }
         let grid = self.settings.reel_grid;
+        let side = position.is_side();
+        let vertical = grid || side;
         let palette = theme::DecisionPalette::new(self.settings.colourblind);
         let height = ui.available_height().max(70.0);
         let card_width = if grid {
             self.settings.reel_thumbnail_size.clamp(100.0, 300.0)
+        } else if side {
+            // Resizing a sidebar changes the strip's thumbnail width. Leave room
+            // for the scrollbar and the gap between cards.
+            (ui.available_width() - 24.0).clamp(100.0, 1024.0)
         } else {
             // Dragging the row's top edge directly changes the preview size.
             ((height - 40.0) * 1.5).clamp(100.0, 540.0)
         };
         let columns = if grid {
             (ui.available_width() / (card_width + 8.0)).floor().max(1.0) as usize
+        } else if side {
+            1
         } else {
             self.visible.len().max(1)
         };
@@ -25,7 +33,7 @@ impl App {
             columns,
             cell: egui::vec2(
                 card_width + 8.0,
-                if grid {
+                if vertical {
                     card_width / 1.5 + 48.0
                 } else {
                     height - 10.0
@@ -56,19 +64,19 @@ impl App {
         let mut context_target = None;
         let mut context_command = None;
         let follow = std::mem::take(&mut self.reel_follow);
-        let scroll = if grid {
+        let scroll = if vertical {
             egui::ScrollArea::vertical()
         } else {
             egui::ScrollArea::horizontal()
         };
         // Map a normal wheel onto the only enabled axis (including Shift+wheel).
         ui.style_mut().always_scroll_the_only_direction = true;
-        let result = scroll.id_salt(("reel", grid))
+        let result = scroll.id_salt(("reel", grid, position))
             .auto_shrink([false, false])
             .animated(false)
             .wheel_scroll_multiplier(egui::Vec2::splat(self.settings.reel_scroll_speed.clamp(0.25, 8.0)))
             .show_viewport(ui, |ui, viewport| {
-                let total = if grid {
+                let total = if vertical {
                     egui::vec2(ui.available_width(), self.visible.len().div_ceil(columns) as f32 * layout.cell.y)
                 } else { egui::vec2(self.visible.len() as f32 * layout.cell.x, layout.cell.y) };
                 ui.set_min_size(total);
@@ -77,7 +85,7 @@ impl App {
                 if follow && let Some(position) = self.visible.iter().position(|i| *i == self.selected) {
                     ui.scroll_to_rect(layout.rect(position).translate(origin), None);
                 }
-                for position in layout.range(viewport, grid) {
+                for position in layout.range(viewport, vertical) {
                     let index = self.visible[position];
                     let shot = &session.shots[index];
                     let rect = layout.rect(position).translate(origin);
@@ -105,7 +113,7 @@ impl App {
                             }
                         }
                         ui.separator();
-                        for (label, command) in [("Pin as A", Command::Pin), ("Row / grid", Command::ReelMode), ("Select all", Command::SelectAll), ("Clear selection", Command::DeselectAll)] {
+                        for (label, command) in [("Pin as A", Command::Pin), ("Strip / grid", Command::ReelMode), ("Select all", Command::SelectAll), ("Clear selection", Command::DeselectAll)] {
                             let item = theme::icon_button(ui, &button_text(label, command), theme::command_icon(command).unwrap());
                             #[cfg(feature = "ui-smoke")]
                             self.reel_menu_items.push((command, item.rect));
