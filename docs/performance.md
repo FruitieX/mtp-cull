@@ -114,7 +114,7 @@ Review/Performance/Shortcuts settings tabs. Set `MTP_CULL_SMOKE_SIZE=1024x768` t
 repeat the compact-window run; the default remains 2560x1440.
 
 The functional suite now includes the merged CLI request/retry path, safe-copy
-regressions and distinct persisted shortcut IDs. Windows has 47 passing tests
+regressions and distinct persisted shortcut IDs. Windows has 53 passing tests
 and two opt-in fixture/benchmark tests; the Windows-hosted Linux adapter/API
 harness has 21 passing tests. Formatting and strict Clippy pass.
 
@@ -141,3 +141,14 @@ suggestions and confirm centered actions. The camera entry in those captures is
 synthetic; no physical camera was contacted by this smoke run. Fresh MTP reconnect
 resolution still needs a physical-device check. Warm UI CPU medians/p95 were
 0.264/0.373 ms at 2560x1440 and 0.264/0.351 ms at 1024x768 in these runs.
+
+The default-launch/preset suite additionally verifies CLI parsing, JSON round trips
+and malformed-file preservation, date resolution per run, shared CLI destination
+planning, named-device ambiguity, and a complete preset/list/copy/retry round trip
+through a simulated device worker without staging. Native smoke launches the
+binary with no arguments in isolated empty configuration and captures the home
+page and new-preset editor. Full fixture runs at both window sizes load six
+profiles from an isolated JSON file to exercise bounded preset lists and the editor.
+Profile fixtures contain generic sample paths and never contact a physical device.
+Save controls stay outside the editor scroll area. Physical phone/NAS preset
+imports still need verification with real devices and destinations.

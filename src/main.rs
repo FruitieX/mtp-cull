@@ -7,11 +7,13 @@ mod commands;
 mod culling;
 mod focus;
 mod image_cache;
+mod import_presets;
 mod imports;
 mod mtp_file;
 mod mtp_worker;
 #[cfg(test)]
 mod performance;
+mod quick_import;
 mod recent_sources;
 mod review;
 mod review_commands;
@@ -29,7 +31,10 @@ fn main() -> color_eyre::eyre::Result<()> {
 
     let cli = cli::parse_args();
 
-    match &cli.command {
+    let command = cli
+        .command
+        .unwrap_or_else(|| cli::Commands::Ui(cli::UiArgs::default()));
+    match &command {
         cli::Commands::List => commands::list_devices()?,
         cli::Commands::ListContent(args) => commands::list_content(args)?,
         cli::Commands::Copy(args) => commands::copy_files(args)?,

@@ -1,6 +1,8 @@
 use crate::image_cache::{ImageCache, Key};
+use crate::import_presets::{self, ImportPreset};
 use crate::imports::{ImportOperation, ImportUpdate};
 use crate::mtp_worker::{ImportPaths, MtpDevice, MtpEvent, MtpRequest, MtpWorker, SourceFolder};
+use crate::quick_import;
 use crate::recent_sources::{self, RecentSource};
 use crate::review::{self, Decision, History, Kind, Session, Settings, Source};
 use crate::review_commands::{self, COMMANDS, Command};
@@ -100,6 +102,12 @@ struct App {
     camera_busy: bool,
     camera_picker: bool,
     pending_camera: Option<(RecentSource, bool)>,
+    presets_path: PathBuf,
+    presets: Vec<ImportPreset>,
+    presets_open: bool,
+    preset_edit: Option<(Option<usize>, ImportPreset)>,
+    preset_error: Option<String>,
+    quick_import: Option<quick_import::Run>,
     settings_open: bool,
     settings_tab: u8,
     import_open: bool,
@@ -119,6 +127,11 @@ impl App {
         let store = Store::open()?;
         let settings = store.settings()?;
         let cache = ImageCache::new(settings.cpu_cache_mib * 1024 * 1024);
+        let presets_path = import_presets::config_path()?;
+        let (presets, preset_error) = match import_presets::load(&presets_path) {
+            Ok(presets) => (presets, None),
+            Err(error) => (Vec::new(), Some(format!("{error:#}"))),
+        };
         Ok(Self {
             #[cfg(feature = "ui-smoke")]
             smoke: smoke::Smoke::from_environment()?,
@@ -156,6 +169,12 @@ impl App {
             camera_busy: false,
             camera_picker: false,
             pending_camera: None,
+            presets_path,
+            presets,
+            presets_open: false,
+            preset_edit: None,
+            preset_error,
+            quick_import: None,
             settings_open: false,
             settings_tab: 0,
             import_open: false,
@@ -662,8 +681,21 @@ impl App {
                 self.staging_paused = !self.staging_paused;
                 self.staging_request = None;
             }
+            Command::Presets => {
+                self.presets_open = true;
+                if self.presets.is_empty() && self.preset_error.is_none() {
+                    self.preset_edit = Some((None, ImportPreset::default()));
+                }
+            }
             Command::Cancel => {
+                if self.quick_import.take().is_some() {
+                    self.send(MtpRequest::CloseSession);
+                    self.camera_busy = false;
+                    self.message =
+                        Some("Import cancelled; completed destination files are preserved".into());
+                }
                 let modal = self.settings_open
+                    || self.presets_open
                     || self.import_open
                     || self.help_open
                     || self.palette_open
@@ -681,6 +713,8 @@ impl App {
                     }
                 }
                 self.settings_open = false;
+                self.presets_open = false;
+                self.preset_edit = None;
                 self.import_open = false;
                 self.help_open = false;
                 self.palette_open = false;
@@ -694,6 +728,93 @@ impl App {
             && let Err(error) = worker.send(request)
         {
             self.error = Some(error.to_string());
+            self.camera_busy = false;
+            self.quick_import = None;
+        }
+    }
+    fn can_run_preset(&self) -> bool {
+        self.can_open_source() && self.session.is_none()
+    }
+    fn start_preset(&mut self, preset: &ImportPreset) {
+        if !self.can_run_preset() {
+            return;
+        }
+        let run = match quick_import::Run::new(preset) {
+            Ok(run) => run,
+            Err(error) => {
+                self.error = Some(format!("{error:#}"));
+                return;
+            }
+        };
+        if self.worker.is_none() {
+            match MtpWorker::spawn() {
+                Ok(worker) => self.worker = Some(worker),
+                Err(error) => {
+                    self.error = Some(format!("{error:#}"));
+                    return;
+                }
+            }
+        }
+        self.send(MtpRequest::CloseSession);
+        self.camera_picker = false;
+        self.pending_camera = None;
+        self.staging_text.clear();
+        self.staging_active = false;
+        self.camera_busy = true;
+        self.camera_progress = 0.0;
+        self.message = Some(format!("{}: looking for device...", run.name));
+        self.error = None;
+        self.quick_import = Some(run);
+        self.send(MtpRequest::ListDevices);
+    }
+    fn handle_quick_import(&mut self, event: &MtpEvent) {
+        let Some(run) = &mut self.quick_import else {
+            return;
+        };
+        match run.event(event) {
+            Ok(quick_import::Action::None) => {}
+            Ok(quick_import::Action::Request(request)) => {
+                self.camera_progress = 0.0;
+                self.message = Some(format!(
+                    "{}: {}...",
+                    run.name,
+                    if matches!(request, MtpRequest::ListFiles { .. }) {
+                        "listing files"
+                    } else {
+                        "copying files"
+                    }
+                ));
+                self.send(request);
+            }
+            Ok(quick_import::Action::Finished(result)) => {
+                let name = run.name.clone();
+                self.quick_import = None;
+                self.camera_busy = false;
+                self.message = Some(format!(
+                    "{name}: copied {} files; {} already present; {} failed",
+                    result.copied_files,
+                    result.skipped_files,
+                    result.errors.len()
+                ));
+                if !result.errors.is_empty() {
+                    self.error = Some(
+                        result
+                            .errors
+                            .iter()
+                            .map(|error| format!("{}: {}", error.source_path, error.message))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
+                }
+                self.send(MtpRequest::CloseSession);
+            }
+            Err(error) => {
+                self.error = Some(format!("{error:#}"));
+                self.message = Some("Could not start preset import".into());
+                self.quick_import = None;
+                self.camera_busy = false;
+                self.send(MtpRequest::CloseSession);
+            }
         }
     }
     fn can_open_source(&self) -> bool {
@@ -876,6 +997,7 @@ impl App {
             }
         }
         for event in events {
+            self.handle_quick_import(&event);
             match event {
                 MtpEvent::FilesListed(_) | MtpEvent::CopyFinished(_) => {}
                 MtpEvent::Devices(devices) => {
@@ -957,6 +1079,13 @@ impl App {
                     ));
                 }
                 MtpEvent::Error { operation, message } => {
+                    if self.quick_import.take().is_some() {
+                        self.send(MtpRequest::CloseSession);
+                        self.message = Some(
+                            "Preset import failed; completed destination files are preserved"
+                                .into(),
+                        );
+                    }
                     self.camera_busy = false;
                     self.error = Some(format!("{operation}: {message}"));
                 }
@@ -1045,6 +1174,7 @@ impl App {
     }
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if self.settings_open
+            || self.presets_open
             || self.import_open
             || self.camera_picker
             || self.help_open
@@ -1245,6 +1375,7 @@ impl App {
                 ui.menu_button("More", |ui| {
                     for (label, command) in [
                         ("Settings", Command::Settings),
+                        ("Import presets", Command::Presets),
                         ("Keyboard shortcuts", Command::Help),
                         ("Command palette", Command::Palette),
                     ] {
@@ -1921,6 +2052,7 @@ Older inactive caches can be evicted to make room.").small().color(theme::MUTED)
         }
         self.camera_dialog(ctx);
         self.import_dialog(ctx);
+        self.presets_dialog(ctx);
     }
     fn camera_dialog(&mut self, ctx: &egui::Context) {
         if !self.camera_picker {
@@ -2164,66 +2296,78 @@ impl eframe::App for App {
             .frame(egui::Frame::new().fill(theme::BACKGROUND).inner_margin(8))
             .show(ui, |ui| {
                 if self.session.is_none() {
-                    let recent_count = self.settings.recent_sources.len().min(5);
-                    let block_height = 180.0
-                        + if recent_count > 0 {
-                            40.0 + recent_count as f32 * 34.0
-                        } else {
-                            0.0
-                        };
-                    ui.add_space(((ui.available_height() - block_height) * 0.5).max(20.0));
-                    ui.vertical_centered(|ui| {
-                        ui.heading("Review your photos");
-                        ui.add_space(8.0);
-                        ui.label(
+                    egui::ScrollArea::vertical()
+                        .id_salt("welcome-content")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let recent_count = self.settings.recent_sources.len().min(5);
+                            let preset_height = if self.presets.is_empty() {
+                                65.0
+                            } else {
+                                95.0 + self.presets.len().min(5) as f32 * 34.0
+                            };
+                            let block_height = 180.0
+                                + preset_height
+                                + if recent_count > 0 {
+                                    40.0 + recent_count as f32 * 34.0
+                                } else {
+                                    0.0
+                                };
+                            ui.add_space(((ui.available_height() - block_height) * 0.5).max(20.0));
+                            ui.vertical_centered(|ui| {
+                                ui.heading("Review your photos");
+                                ui.add_space(8.0);
+                                ui.label(
                             egui::RichText::new(
                                 "Find the keepers. Compare the details. Import your favourites.",
                             )
                             .color(theme::MUTED),
                         );
-                        ui.add_space(20.0);
-                        let button_width: f32 = ["Connect camera", "Open a folder"]
-                            .iter()
-                            .map(|label| {
-                                ui.painter()
-                                    .layout_no_wrap(
-                                        (*label).into(),
-                                        egui::TextStyle::Button.resolve(ui.style()),
-                                        ui.visuals().text_color(),
+                                ui.add_space(20.0);
+                                let button_width: f32 = ["Connect camera", "Open a folder"]
+                                    .iter()
+                                    .map(|label| {
+                                        ui.painter()
+                                            .layout_no_wrap(
+                                                (*label).into(),
+                                                egui::TextStyle::Button.resolve(ui.style()),
+                                                ui.visuals().text_color(),
+                                            )
+                                            .size()
+                                            .x
+                                            + 2.0 * ui.spacing().button_padding.x
+                                    })
+                                    .sum::<f32>()
+                                    + ui.spacing().item_spacing.x;
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(button_width, 32.0),
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        self.command_button(ui, "Connect camera", Command::Camera);
+                                        self.command_button(ui, "Open a folder", Command::Open);
+                                    },
+                                );
+                                ui.add_space(14.0);
+                                ui.label(
+                                    egui::RichText::new(
+                                        "JPEG + RAW linked · Videos included · Originals stay safe",
                                     )
-                                    .size()
-                                    .x
-                                    + 2.0 * ui.spacing().button_padding.x
-                            })
-                            .sum::<f32>()
-                            + ui.spacing().item_spacing.x;
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(button_width, 32.0),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |ui| {
-                                self.command_button(ui, "Connect camera", Command::Camera);
-                                self.command_button(ui, "Open a folder", Command::Open);
-                            },
-                        );
-                        ui.add_space(14.0);
-                        ui.label(
-                            egui::RichText::new(
-                                "JPEG + RAW linked · Videos included · Originals stay safe",
-                            )
-                            .small()
-                            .color(theme::MUTED),
-                        );
-                        if recent_count > 0 {
-                            ui.add_space(20.0);
-                            ui.label(
-                                egui::RichText::new("Recent sources")
                                     .small()
                                     .color(theme::MUTED),
-                            );
-                            ui.add_space(8.0);
-                            self.recent_sources_ui(ui, 5, true);
-                        }
-                    });
+                                );
+                                if recent_count > 0 {
+                                    ui.add_space(20.0);
+                                    ui.label(
+                                        egui::RichText::new("Recent sources")
+                                            .small()
+                                            .color(theme::MUTED),
+                                    );
+                                    ui.add_space(8.0);
+                                    self.recent_sources_ui(ui, 5, true);
+                                }
+                                self.home_presets(ui);
+                            });
+                        });
                 } else if self.visible.is_empty() {
                     ui.centered_and_justified(|ui| {
                         ui.label("No images match the current filters.");
@@ -2233,6 +2377,7 @@ impl eframe::App for App {
                     let b = self.view_image(self.selected, edge);
                     let blink = !ctx.egui_wants_keyboard_input()
                         && !self.settings_open
+                        && !self.presets_open
                         && !self.import_open
                         && !self.camera_picker
                         && !self.palette_open
@@ -2297,6 +2442,9 @@ impl eframe::App for App {
         }
     }
 }
+
+#[path = "preset_ui.rs"]
+mod preset_ui;
 
 #[cfg(feature = "ui-smoke")]
 #[path = "ui_smoke.rs"]

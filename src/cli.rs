@@ -6,7 +6,7 @@ use clap::{Args, Parser, Subcommand};
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -19,11 +19,11 @@ pub enum Commands {
 
     #[clap(verbatim_doc_comment)]
     /// Copy files from a device into a directory structure like:
-    /// <TARGET_PATH>/{file_type}/{year}/<DATE> <ALBUM_NAME>/{file_name}
+    /// <TARGET_PATH>/{year}/<DATE> <ALBUM_NAME>/{file_name}
     ///
     /// Where:
     /// - <TARGET_PATH>, <DATE> and <ALBUM_NAME> are arguments.
-    /// - {file_type} is either "Out-of-camera", "Undeveloped" or "Video" depending on filename extension.
+    /// - <TARGET_PATH> is the photo, RAW or video destination for the file type.
     /// - {year} is computed from the <DATE> argument.
     /// - {file_name} is the original filename.
     Copy(CopyArgs),
@@ -32,7 +32,7 @@ pub enum Commands {
     Ui(UiArgs),
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Default)]
 pub struct UiArgs {
     /// Open a local JPEG folder immediately, without the folder picker.
     #[arg(long)]
@@ -53,7 +53,7 @@ pub struct ShowContentArgs {
     pub path: Option<String>,
 }
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Clone)]
 pub struct CopyArgs {
     /// The MTP device name to copy from, defaults to first device.
     ///
@@ -107,4 +107,34 @@ pub struct CopyArgs {
 
 pub fn parse_args() -> Cli {
     Cli::parse()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn no_arguments_allow_the_ui_default_and_explicit_commands_still_parse() {
+        assert!(Cli::try_parse_from(["mtp-cull"]).unwrap().command.is_none());
+        assert!(matches!(
+            Cli::try_parse_from(["mtp-cull", "list"]).unwrap().command,
+            Some(Commands::List)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["mtp-cull", "ui", "--source", "photos"])
+                .unwrap()
+                .command,
+            Some(Commands::Ui(UiArgs {
+                source: Some(_),
+                ..
+            }))
+        ));
+        assert_eq!(
+            Cli::try_parse_from(["mtp-cull", "--help"])
+                .unwrap_err()
+                .kind(),
+            clap::error::ErrorKind::DisplayHelp
+        );
+        assert!(Cli::try_parse_from(["mtp-cull", "copy"]).is_err());
+        assert!(Cli::try_parse_from(["mtp-cull", "typo"]).is_err());
+    }
 }

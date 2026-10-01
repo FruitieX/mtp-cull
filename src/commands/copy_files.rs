@@ -45,13 +45,12 @@ fn destination_for(
         .join(&file.name))
 }
 
-pub fn copy_files(args: &CopyArgs) -> Result<()> {
-    let date = args
-        .date
-        .unwrap_or_else(|| chrono::Local::now().date_naive());
-    let backend = MtpBackend::spawn()?;
-    let device = backend.select_device(args.device.as_deref())?;
-    let files = backend.list_files(device.id, args.source_path.clone())?;
+/// Shared CLI/preset preflight: reject invalid names and collisions before any write.
+pub(crate) fn plan_copy(
+    files: &[MtpFileInfo],
+    args: &CopyArgs,
+    date: chrono::NaiveDate,
+) -> Result<Vec<MtpCopyItem>> {
     let destinations = files
         .iter()
         .map(|file| destination_for(file, args, date))
@@ -59,7 +58,10 @@ pub fn copy_files(args: &CopyArgs) -> Result<()> {
 
     let mut planned = HashMap::new();
     for (file, destination) in files.iter().zip(&destinations) {
-        if let Some(previous) = planned.insert(destination.clone(), file.path.as_str()) {
+        if let Some(previous) = planned.insert(
+            destination.to_string_lossy().to_ascii_lowercase(),
+            file.path.as_str(),
+        ) {
             bail!(
                 "{} and {} both map to {}; refusing an ambiguous flattened copy",
                 previous,
@@ -69,9 +71,7 @@ pub fn copy_files(args: &CopyArgs) -> Result<()> {
         }
     }
 
-    let total_size = files.iter().map(|file| file.size).sum::<u64>();
-    let total_files = files.len();
-    let copy_items = files
+    Ok(files
         .iter()
         .zip(&destinations)
         .map(|(file, destination)| MtpCopyItem {
@@ -80,7 +80,19 @@ pub fn copy_files(args: &CopyArgs) -> Result<()> {
             size: file.size,
             destination: destination.clone(),
         })
-        .collect();
+        .collect())
+}
+
+pub fn copy_files(args: &CopyArgs) -> Result<()> {
+    let date = args
+        .date
+        .unwrap_or_else(|| chrono::Local::now().date_naive());
+    let backend = MtpBackend::spawn()?;
+    let device = backend.select_device(args.device.as_deref())?;
+    let files = backend.list_files(device.id, args.source_path.clone())?;
+    let copy_items = plan_copy(&files, args, date)?;
+    let total_size = files.iter().map(|file| file.size).sum::<u64>();
+    let total_files = files.len();
     let start_time = std::time::Instant::now();
     let result = backend.copy_files(copy_items, args.keep_going)?;
     let elapsed = start_time.elapsed();

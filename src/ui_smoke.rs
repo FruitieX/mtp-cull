@@ -99,7 +99,38 @@ impl Smoke {
         if app.loader.is_some() || app.cache.pending() || self.frames < 4 {
             return Ok(());
         }
+        // Allow popup animation to finish before judging editor layout.
+        if matches!(self.step, 25 | 31) && self.frames < 40 {
+            return Ok(());
+        }
         match self.step {
+            0 if std::env::var_os("MTP_CULL_SMOKE_HOME_ONLY").is_some() => {
+                if app.session.is_some() {
+                    bail!("default launch should open the home page");
+                }
+                self.capture(ctx, "welcome-default");
+                self.step = 30;
+            }
+            30 => {
+                app.command(Command::Presets);
+                if let Some(preset) = app.presets.first() {
+                    app.preset_edit = Some((Some(0), preset.clone()));
+                }
+                self.step = 31;
+                self.frames = 0;
+            }
+            31 => {
+                self.capture(ctx, "import-presets");
+                self.step = 32;
+            }
+            32 => {
+                std::fs::write(
+                    self.root.join("PASS.txt"),
+                    "PASS: no-argument UI launch, home page, import preset editor.\n",
+                )?;
+                self.step = 255;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
             0 => {
                 if app.session.as_ref().is_none_or(|s| s.shots.len() < 3) {
                     bail!("smoke requires at least three paired photos");
@@ -339,6 +370,19 @@ impl Smoke {
                 self.step = 24;
             }
             24 => {
+                app.command(Command::Close);
+                app.command(Command::Presets);
+                if let Some(preset) = app.presets.first() {
+                    app.preset_edit = Some((Some(0), preset.clone()));
+                }
+                self.step = 25;
+                self.frames = 0;
+            }
+            25 => {
+                self.capture(ctx, "import-presets");
+                self.step = 26;
+            }
+            26 => {
                 self.step = 255;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }

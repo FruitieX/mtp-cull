@@ -12,8 +12,11 @@ and NASM, then run:
 
 ```powershell
 ./scripts/build-windows.ps1
-./target/release/mtp-cull.exe ui
+./target/release/mtp-cull.exe
 ```
+
+Running the binary without arguments opens the UI, including when double-clicked
+in Windows. Explicit CLI subcommands and `--help` still work.
 
 A portable build using the current pure Rust `image`/`zune-jpeg` decoder needs
 no CMake/NASM:
@@ -46,7 +49,7 @@ The MTP CLI commands support Windows and Linux through the same device worker.
    These are inspection aids; noise, texture and JPEG processing affect scores.
 5. Open **Import selected**, choose JPEG/RAW/video destinations, date and album,
    and copy. Videos default to selected and included. Unreviewed JPEGs are excluded.
-   Destination layout is `root/Out-of-camera|Undeveloped|Video/year/date album/name`.
+   Each media type uses its own destination root: `root/year/date album/name`.
 
 The toolbar groups decisions, pin/swap, comparison mode, zoom and focus tools.
 Media and decision filters sit above the filmstrip. **More** opens Settings,
@@ -73,6 +76,32 @@ persist locally. Reopen the same source to resume. Changed files require review
 again. Camera assets without trustworthy timestamps deliberately require fresh
 decisions on reconnect. Old fingerprint-based decisions from the retired UI stay
 in the database but are not automatically migrated to metadata-based sessions.
+
+## Import presets (without culling)
+
+On the home page, **Add import preset** saves a device/source and destinations for
+one-click copying. You can also use **More > Import presets** or Ctrl+Shift+I.
+Set a name, device name, recursive MTP source path, photo/video/RAW destination
+roots, optional date/album, and whether to continue after individual file errors.
+A blank device uses the first connected device, a blank source uses the device
+root, and a blank date means today at the time the preset runs. Duplicate a preset
+to reuse device settings for another photographer or destination.
+
+Saved presets appear under **Import without reviewing**. Click one to copy all
+supported photos, RAWs and videos through the CLI copy worker, with progress,
+cancellation, collision checks and identical-file skipping. This does not stage
+JPEGs or apply review picks. Close an active review session to return home and run
+a preset. Completed destination files survive cancellation; source files remain
+intact. The output layout is exactly `destination/year/date album/filename`.
+
+Presets start empty and are stored separately from the review database in
+`import-presets.json` under the platform user configuration directory. On Windows:
+`%APPDATA%/fruit/mtp-cull/config/import-presets.json`. The editor shows the exact
+path and has **Copy path** and **Reload file** controls for external editing. Linux
+uses `$XDG_CONFIG_HOME/mtp-cull` (normally `~/.config/mtp-cull`); macOS uses the
+application's directory under `~/Library/Application Support`. Saving atomically
+replaces valid JSON; malformed/unsupported configuration is reported and preserved.
+`MTP_CULL_DATA_DIR` redirects this file too for development and smoke isolation.
 
 ## Main shortcuts
 

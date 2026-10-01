@@ -23,6 +23,8 @@ measurements and their limits. The original design remains in
 | `review_commands.rs` | Configurable registry, exact shortcut matching/conflicts |
 | `review_store.rs` | SQLite settings, decisions and comparison resume state |
 | `recent_sources.rs` | Bounded source history and fresh device/path resolution |
+| `import_presets.rs`, `preset_ui.rs` | User configuration file and preset editor/home actions |
+| `quick_import.rs` | Preset device/list/copy state machine using the existing MTP worker |
 | `image_cache.rs` | Bounded decode pool, prioritized demand and CPU tier eviction |
 | `viewer.rs` | Shared transforms, side-by-side/wipe/blink, GPU cache and ROI |
 | `focus.rs`, `bursts.rs` | Native gradient maps and optional capture/similarity groups |
@@ -63,6 +65,25 @@ The welcome screen shows five suggestions; the toolbar menu shows twelve. Its
 camera button suggests the last camera path without starting review automatically;
 clicking a specific recent source does start review after successful resolution.
 Welcome action buttons use their actual text/padding width for centered alignment.
+
+## No-argument launch and copy presets
+
+CLI subcommands are optional; `main` defaults to `Ui(UiArgs::default())`. Presets
+are user-owned JSON under ProjectDirs.config_dir, starting empty. Development
+isolation redirects them into MTP_CULL_DATA_DIR. They deliberately do not live in
+SQLite Settings or have baked-in defaults. Atomic config saves preserve malformed
+external files instead of overwriting them. The editor supports add/edit/duplicate/
+delete, recent camera paths, external reload and a copyable config path.
+
+Preset imports run only without an active review. They close any retained camera
+session and use the existing worker's ListDevices, ListFiles and CopyFiles requests
+without staging JPEGs. The shared CLI plan_copy function preserves destination
+layout and rejects flattened collisions before writes (including case collisions).
+Today is resolved when each run starts; named devices must match uniquely. The
+state machine ignores duplicate or unrelated events. Cancellation closes the
+worker session, invalidating in-flight results by generation, and completed files
+remain intact. Progress and per-file failures are presented by the UI. Review and
+image decoding remain independent of presets.
 
 ## Verification
 

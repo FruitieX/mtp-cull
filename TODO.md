@@ -104,3 +104,15 @@ The physical X-T5 successfully staged 232 JPEGs, with stable metadata available
 for cache reuse. The user reports smooth animated zoom and pan on a 240 Hz display;
 this is qualitative hardware feedback, not an instrumented latency measurement.
 Disconnect/reconnect, NAS imports and native Linux checks remain as listed above.
+
+## October 2026 source and import conveniences
+
+- [x] Keep/reject/unreviewed borders around viewer images and filmstrip previews.
+- [x] Persist recent folders (including companion RAW folders) and MTP device/path suggestions.
+- [x] Center welcome actions using their actual text/padding dimensions.
+- [x] Open the UI when the binary is launched without arguments.
+- [x] Add user-owned JSON import presets with add/edit/duplicate/delete and external reload.
+- [x] Run one-click home-page presets using CLI copy planning and the existing device worker, without culling or staging.
+- [x] Cover preset date/layout/config behavior and simulated-worker copy/retry; verify native default launch and editor layouts.
+
+Physical phone/NAS preset import validation remains a hardware check.

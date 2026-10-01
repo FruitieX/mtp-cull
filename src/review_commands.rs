@@ -61,6 +61,7 @@ pub enum Command {
     BulkKeep,
     BulkReject,
     Import,
+    Presets,
     Settings,
     Help,
     Palette,
@@ -429,6 +430,12 @@ pub const COMMANDS: &[Spec] = &[
         id: "import",
         label: "Review import",
         key: "Ctrl+I",
+    },
+    Spec {
+        command: Command::Presets,
+        id: "import_presets",
+        label: "Manage import presets",
+        key: "Ctrl+Shift+I",
     },
     Spec {
         command: Command::Settings,

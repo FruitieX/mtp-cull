@@ -619,6 +619,51 @@ mod tests {
         }
         assert!(previews.try_recv().is_err());
     }
+    #[test]
+    fn preset_workflow_uses_worker_copy_with_retry_and_no_staging() {
+        use crate::import_presets::ImportPreset;
+        use crate::quick_import::{Action, Run};
+        let directory = tempfile::tempdir().unwrap();
+        let preset = ImportPreset {
+            name: "Backup".into(),
+            device: "Camera".into(),
+            source_path: "DCIM".into(),
+            pictures_path: directory.path().display().to_string(),
+            videos_path: directory.path().display().to_string(),
+            raw_path: directory.path().display().to_string(),
+            date: "2026-10-01".into(),
+            ..Default::default()
+        };
+        let (worker, started, release, previews) = fixture();
+        for retry in [false, true] {
+            let mut run = Run::new(&preset).unwrap();
+            worker.send(MtpRequest::CloseSession).unwrap();
+            worker.send(MtpRequest::ListDevices).unwrap();
+            started.recv_timeout(Duration::from_secs(1)).unwrap();
+            release.send(()).unwrap();
+            loop {
+                let event = worker.recv().unwrap();
+                if let MtpEvent::Error { operation, message } = &event {
+                    panic!("{operation}: {message}");
+                }
+                match run.event(&event).unwrap() {
+                    Action::None => {}
+                    Action::Request(request) => worker.send(request).unwrap(),
+                    Action::Finished(result) => {
+                        assert_eq!(result.copied_files, usize::from(!retry));
+                        assert_eq!(result.skipped_files, usize::from(retry));
+                        assert!(result.errors.is_empty());
+                        break;
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            std::fs::read(directory.path().join("2026/2026-10-01/photo.jpg")).unwrap(),
+            b"abc"
+        );
+        assert!(previews.try_recv().is_err());
+    }
     fn fixture() -> (Worker, Receiver<String>, Sender<()>, Receiver<String>) {
         let (started, start) = mpsc::channel();
         let (release, wait) = mpsc::channel();
