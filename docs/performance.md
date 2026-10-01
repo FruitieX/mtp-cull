@@ -152,3 +152,20 @@ profiles from an isolated JSON file to exercise bounded preset lists and the edi
 Profile fixtures contain generic sample paths and never contact a physical device.
 Save controls stay outside the editor scroll area. Physical phone/NAS preset
 imports still need verification with real devices and destinations.
+
+## Windows package verification
+
+Application branding and packaging retain the existing viewer/decoder behavior.
+The production SIMD suite passes 53 tests (two fixture/benchmark tests remain
+opt-in), formatting and strict Clippy. The native 2560x1440 fixture smoke passes
+comparisons, focus/ROI, selections, import/retry and resume; 117 warm frame samples
+have median/p95/maximum UI CPU times of 0.271/0.470/0.705 ms. These exclude GPU
+presentation and input-to-photon latency.
+
+A separate Explorer-style no-argument process launch verifies that its owned
+console is detached and the home page/preset editor work in isolated configuration.
+Package checks validate embedded icons/version information, bundled runtime and
+licenses, CLI success/errors and checksums. An isolated installer lifecycle test
+passes per-user install, upgrade, default/optional shortcuts, uninstall and
+preservation of unmanaged user files. Repeatable packaging commands and remaining
+clean-machine/release checks are in [windows-packaging.md](windows-packaging.md).

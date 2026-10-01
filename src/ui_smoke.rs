@@ -105,6 +105,12 @@ impl Smoke {
         }
         match self.step {
             0 if std::env::var_os("MTP_CULL_SMOKE_HOME_ONLY").is_some() => {
+                #[cfg(windows)]
+                if std::env::var_os("MTP_CULL_SMOKE_EXPECT_DETACHED").is_some()
+                    && crate::windows_app::console_process_count() != 0
+                {
+                    bail!("Explorer-style launch retained its owned console");
+                }
                 if app.session.is_some() {
                     bail!("default launch should open the home page");
                 }

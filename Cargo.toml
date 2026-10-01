@@ -3,6 +3,10 @@ name = "mtp-cull"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97"
+description = "Fast camera photo review and safe MTP photo backup"
+authors = ["Rasmus Lövegren"]
+license = "MIT"
+repository = "https://github.com/FruitieX/mtp-cull"
 
 [features]
 default = []
@@ -32,6 +36,9 @@ tempfile = "3.27.0"
 [dev-dependencies]
 # Retained only for the retired culling database regression tests.
 trash = "5.2.9"
+
+[build-dependencies]
+winresource = "0.1.31"
 
 [target.'cfg(windows)'.dependencies]
 winmtp = "0.3.2"

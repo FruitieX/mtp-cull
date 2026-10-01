@@ -24,6 +24,7 @@ mod transfer_progress;
 #[path = "app.rs"]
 mod ui;
 mod viewer;
+mod windows_app;
 
 fn main() -> color_eyre::eyre::Result<()> {
     color_eyre::install()?;
@@ -34,11 +35,21 @@ fn main() -> color_eyre::eyre::Result<()> {
     let command = cli
         .command
         .unwrap_or_else(|| cli::Commands::Ui(cli::UiArgs::default()));
+    let _lifetime = windows_app::AppLifetime::new();
     match &command {
         cli::Commands::List => commands::list_devices()?,
         cli::Commands::ListContent(args) => commands::list_content(args)?,
         cli::Commands::Copy(args) => commands::copy_files(args)?,
-        cli::Commands::Ui(args) => ui::init(args)?,
+        cli::Commands::Ui(args) => {
+            let detached = windows_app::detach_owned_console();
+            windows_app::set_app_id();
+            if let Err(error) = ui::init(args) {
+                if detached {
+                    windows_app::show_startup_error(&format!("{error:#}"));
+                }
+                return Err(error);
+            }
+        }
     };
 
     Ok(())

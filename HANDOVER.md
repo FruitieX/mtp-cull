@@ -33,6 +33,7 @@ measurements and their limits. The original design remains in
 | `mtp_worker/staging.rs` | Persistent originals, manifests, hash checks and quota |
 | `mtp_worker/windows.rs`, `linux.rs` | Native backend operations |
 | `performance.rs`, `ui_smoke.rs` | Opt-in benchmark fixtures and native UI exercise |
+| `windows_app.rs`, `build.rs`, `assets/` | Windows console lifetime, installer mutex, taskbar identity and embedded branding |
 
 ## Keep these boundaries
 
@@ -84,6 +85,29 @@ state machine ignores duplicate or unrelated events. Cancellation closes the
 worker session, invalidating in-flight results by generation, and completed files
 remain intact. Progress and per-file failures are presented by the UI. Review and
 image decoding remain independent of presets.
+
+## Windows distribution (October 2026)
+
+`build.rs` embeds a multi-resolution ICO and Cargo product/version metadata using
+winresource. `app.rs` uses the matching checked-in raw RGBA window icon. The
+console subsystem remains enabled: `windows_app.rs` detaches only UI-owned
+consoles, gives detached startup errors a message box, and aligns taskbar identity
+with installer shortcuts. A lifetime mutex covers UI and CLI work for the Inno
+Setup install/uninstall guard; it does not restrict multiple application instances.
+
+`scripts/package-windows.ps1` builds the production SIMD executable, bundles the
+installed MSVC x64 redistributable DLLs and Windows dependency/native/font notices,
+then produces an Inno Setup per-user installer, portable ZIP and SHA256 checksums.
+Keep the installer AppId stable. No installer rule touches user AppData or
+recursively deletes unmanaged files. Reviewed license supplements are tied to
+specific dependency versions; missing notices block packaging.
+
+The release workflow builds/verifies packages manually or on matching version
+tags, creating draft releases only. No signing certificate is configured. Package
+resource/CLI/checksum checks and an isolated install, upgrade, optional shortcut
+and uninstall test pass locally. Native Explorer-style no-argument launch confirms
+console detachment. Clean-machine and GitHub workflow execution remain unverified.
+See [docs/windows-packaging.md](docs/windows-packaging.md) for repeatable commands.
 
 ## Verification
 

@@ -1,0 +1,11 @@
+Microsoft Visual C++ Runtime
+
+The bundled Microsoft VC runtime DLLs are the redistributable x64 release
+files provided with Visual Studio, deployed beside the application. They
+are Microsoft components and are not covered by mtp-cull's MIT license.
+
+Deployment information:
+https://learn.microsoft.com/cpp/windows/redistributing-visual-cpp-files
+
+Update the app-local runtime files when rebuilding packages with an updated
+Visual Studio toolchain. Windows 10 or newer supplies the Universal CRT.

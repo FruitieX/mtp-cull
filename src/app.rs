@@ -25,6 +25,11 @@ pub fn init(args: &crate::cli::UiArgs) -> Result<()> {
         )
     });
     let viewport = egui::ViewportBuilder::default()
+        .with_icon(egui::IconData {
+            rgba: include_bytes!("../assets/icon.rgba").to_vec(),
+            width: 64,
+            height: 64,
+        })
         .with_title("mtp-cull · Camera review")
         .with_maximized(true);
     #[cfg(feature = "ui-smoke")]

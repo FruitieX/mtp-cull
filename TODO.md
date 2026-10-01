@@ -116,3 +116,22 @@ Disconnect/reconnect, NAS imports and native Linux checks remain as listed above
 - [x] Cover preset date/layout/config behavior and simulated-worker copy/retry; verify native default launch and editor layouts.
 
 Physical phone/NAS preset import validation remains a hardware check.
+
+## October 2026 Windows distribution
+
+- [x] Confirm the previous application state is committed and pushed before packaging changes.
+- [x] Add an editable camera icon with embedded executable, installer and window assets.
+- [x] Embed product/version metadata and align taskbar/shortcut application identity.
+- [x] Detach Explorer-created UI consoles while retaining CLI terminal behavior and startup errors.
+- [x] Build a per-user installer with Start-menu and optional desktop shortcuts and uninstall registration.
+- [x] Preserve presets, cached photos and review choices across upgrade/uninstall; guard running applications.
+- [x] Bundle the SIMD release, Visual C++ runtime and dependency/native/font notices in installer and portable ZIP.
+- [x] Generate SHA256 checksums and add manual/tag-based builds with draft release automation.
+- [x] Verify package resources, CLI compatibility, isolated install/upgrade/uninstall and default UI launch.
+- [x] Document package builds, branding and release behavior.
+
+The Windows suite passes 53 tests, with two opt-in benchmark/fixture tests;
+formatting and strict Clippy pass. Installer lifecycle tests use a separate
+identity and workspace directory, preserving the real application's data.
+Clean Windows machine testing and GitHub workflow execution remain environment
+checks. Packages are currently unsigned; certificate-based signing is future work.

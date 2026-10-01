@@ -6,6 +6,12 @@ copy command keeps its original workflow.
 
 ## Run
 
+For Windows, use the installer or extract the complete portable ZIP from a release.
+The installer adds a Start-menu shortcut and an optional desktop shortcut, without
+requiring administrator privileges. Both packages include the runtime DLLs and
+application icon. See [Windows packaging](docs/windows-packaging.md) for building
+packages, verification and release automation.
+
 The SIMD release build is recommended for camera JPEGs. On Windows, install
 Rust (the repository pins its toolchain), Visual Studio C++ build tools, CMake,
 and NASM, then run:
@@ -16,7 +22,9 @@ and NASM, then run:
 ```
 
 Running the binary without arguments opens the UI, including when double-clicked
-in Windows. Explicit CLI subcommands and `--help` still work.
+in Windows. UI launch closes its Explorer-created console; launches from an
+existing terminal keep that terminal attached. Explicit CLI subcommands and
+`--help` still work.
 
 A portable build using the current pure Rust `image`/`zune-jpeg` decoder needs
 no CMake/NASM:
