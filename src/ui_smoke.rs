@@ -543,6 +543,10 @@ impl Smoke {
                 if app.session.as_ref().is_none_or(|s| s.shots.len() < 3) {
                     bail!("smoke requires at least three paired photos");
                 }
+                if std::env::var_os("MTP_CULL_SMOKE_COLOURBLIND").is_some() {
+                    app.settings.colourblind = true;
+                    app.draft_settings.colourblind = true;
+                }
                 app.command(Command::Clear);
                 app.command(Command::Keep);
                 app.command(Command::Pin);
@@ -582,6 +586,11 @@ impl Smoke {
             }
             2 => {
                 app.canvas.mode = Mode::Wipe;
+                if std::env::var_os("MTP_CULL_SMOKE_COLOURBLIND").is_some() {
+                    app.selected = 2;
+                    app.reel_selection.single(2);
+                    app.reel_follow = true;
+                }
                 self.step = 3;
                 self.frames = 0;
             }

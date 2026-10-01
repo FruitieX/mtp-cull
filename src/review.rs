@@ -188,6 +188,7 @@ impl Session {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub colourblind: bool,
     pub link_raw: bool,
     pub include_videos: bool,
     pub auto_advance: bool,
@@ -213,6 +214,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            colourblind: false,
             link_raw: true,
             include_videos: true,
             auto_advance: false,

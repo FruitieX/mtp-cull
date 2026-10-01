@@ -253,6 +253,7 @@ mod tests {
         {
             let store = Store::at(path.clone()).unwrap();
             store.save_settings(&Settings {
+                colourblind: true,
                 recent_sources: sources.clone(),
                 ..Settings::default()
             });
@@ -260,6 +261,7 @@ mod tests {
         {
             let store = Store::at(path.clone()).unwrap();
             assert_eq!(store.settings().unwrap().recent_sources, sources);
+            assert!(store.settings().unwrap().colourblind);
         }
         // A pre-history settings record still loads its other preferences.
         connect(&path)
@@ -272,6 +274,7 @@ mod tests {
         let store = Store::at(path).unwrap();
         let settings = store.settings().unwrap();
         assert!(settings.recent_sources.is_empty());
+        assert!(!settings.colourblind);
         assert!(settings.auto_advance);
     }
     #[test]

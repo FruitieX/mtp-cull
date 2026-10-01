@@ -13,6 +13,47 @@ pub const SELECTED_BG: Color32 = Color32::from_rgb(36, 47, 63);
 pub const REJECT: Color32 = Color32::from_rgb(223, 151, 155);
 
 #[derive(Clone, Copy)]
+pub struct DecisionPalette {
+    pub keep: Color32,
+    pub keep_bg: Color32,
+    pub reject: Color32,
+    pub reject_bg: Color32,
+    pub selection: Color32,
+    pub selection_bg: Color32,
+}
+impl DecisionPalette {
+    pub fn new(colourblind: bool) -> Self {
+        if colourblind {
+            Self {
+                keep: Color32::from_rgb(86, 180, 233),
+                keep_bg: Color32::from_rgb(29, 49, 63),
+                reject: Color32::from_rgb(230, 159, 0),
+                reject_bg: Color32::from_rgb(62, 47, 25),
+                // Keep is blue, so use a neutral editing-selection marker.
+                selection: TEXT,
+                selection_bg: Color32::from_rgb(46, 46, 53),
+            }
+        } else {
+            Self {
+                keep: Color32::from_rgb(93, 203, 148),
+                keep_bg: ACCENT_BG,
+                reject: Color32::from_rgb(232, 114, 122),
+                reject_bg: Color32::from_rgb(59, 39, 43),
+                selection: SELECTED,
+                selection_bg: SELECTED_BG,
+            }
+        }
+    }
+    pub fn color(self, decision: crate::review::Decision) -> Color32 {
+        match decision {
+            crate::review::Decision::Keep => self.keep,
+            crate::review::Decision::Reject => self.reject,
+            crate::review::Decision::Unreviewed => MUTED,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 pub enum Icon {
     Keep,
     Reject,

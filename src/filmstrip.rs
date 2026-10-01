@@ -8,6 +8,7 @@ impl App {
             self.reel_menu_items.clear();
         }
         let grid = self.settings.reel_grid;
+        let palette = theme::DecisionPalette::new(self.settings.colourblind);
         let height = ui.available_height().max(70.0);
         let card_width = if grid {
             self.settings.reel_thumbnail_size.clamp(100.0, 300.0)
@@ -120,12 +121,12 @@ impl App {
                         }
                     });
                     let decision = shot.decision(shot.review_kind(self.media_filter), self.settings.link_raw);
-                    let color = decision_color(decision);
-                    ui.painter().rect_filled(rect, 6.0, if selected { theme::SELECTED_BG } else { theme::SURFACE });
+                    let color = palette.color(decision);
+                    ui.painter().rect_filled(rect, 6.0, if selected { palette.selection_bg } else { theme::SURFACE });
                     ui.painter().rect_stroke(rect, 6.0, egui::Stroke::new(if index == self.selected { 3.0 } else { 1.5 }, color), egui::StrokeKind::Inside);
                     if selected {
-                        // Blue selection is independent of the green/red/gray decision.
-                        ui.painter().rect_stroke(rect.expand(2.0), 7.0, egui::Stroke::new(1.5, theme::SELECTED), egui::StrokeKind::Outside);
+                        // Editing selection is distinct from the decision palette.
+                        ui.painter().rect_stroke(rect.expand(2.0), 7.0, egui::Stroke::new(1.5, palette.selection), egui::StrokeKind::Outside);
                     }
                     if let Some(path) = shot.preview() {
                         let edge = ((card_width * ui.ctx().pixels_per_point()) as u32).div_ceil(128) * 128;
@@ -155,10 +156,10 @@ impl App {
                         self.burst_groups.get(&index).map(|id| format!("B{id} · ")).unwrap_or_default(),
                         if self.pinned == Some(index) { "A · " } else { "" },
                         if shot.conflict() { "PAIR CONFLICT" } else { decision.label() });
-                    ui.painter().with_clip_rect(rect).text(rect.left_bottom() + egui::vec2(8.0, -6.0), egui::Align2::LEFT_BOTTOM, detail, egui::FontId::proportional(11.0), if shot.conflict() { theme::REJECT } else { color });
+                    ui.painter().with_clip_rect(rect).text(rect.left_bottom() + egui::vec2(8.0, -6.0), egui::Align2::LEFT_BOTTOM, detail, egui::FontId::proportional(11.0), if shot.conflict() { palette.reject } else { color });
                     if selected {
                         let mark = rect.right_top() + egui::vec2(-12.0, 12.0);
-                        ui.painter().circle_filled(mark, 7.0, theme::SELECTED);
+                        ui.painter().circle_filled(mark, 7.0, palette.selection);
                         ui.painter().line_segment([mark + egui::vec2(-3.0, 0.0), mark + egui::vec2(-1.0, 2.0)], egui::Stroke::new(1.5, theme::BACKGROUND));
                         ui.painter().line_segment([mark + egui::vec2(-1.0, 2.0), mark + egui::vec2(3.0, -2.0)], egui::Stroke::new(1.5, theme::BACKGROUND));
                     }

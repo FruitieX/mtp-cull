@@ -55,6 +55,9 @@ The MTP CLI commands support Windows and Linux through the same device worker.
    from import; missing companions are reported in the import summary.
 3. Pin A and browse B. Use side-by-side, vertical wipe, or hold-to-blink comparison.
    Green/red/gray borders show Keep/Reject/Unreviewed in the viewer and filmstrip.
+   **Settings > Review > Colourblind-friendly colours** switches decisions to
+   blue/orange/gray and editing selection to white. Decision labels and button
+   icons also distinguish states; the preference is remembered between launches.
    Both images share zoom and pan. 100% maps a source pixel to a physical screen
    pixel, including Windows scaling. Alt-drag B for manual alignment.
 4. Open **Focus** and enable **Sharpness overlay** for native-resolution green peaking. Draw or create a shared

@@ -161,3 +161,4 @@ the full viewer/focus/import/retry/resume smoke also passes. See
 - [x] Prefill new presets from review destinations and remembered camera names/paths; return to the import dialog after saving.
 - [x] Explain import layout and release-build requirements; preserve staged originals and review choices.
 - [x] Cover grid boundaries, filtered order, preset semantics and GPU prefetch admission; verify native grid input and idle native comparison.
+- [x] Add persistent colourblind-friendly blue/orange/gray decision colours for viewer borders, reel cards and buttons, with distinct white editing-selection markers.

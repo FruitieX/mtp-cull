@@ -1310,7 +1310,7 @@ impl App {
         });
         ViewImage {
             name: shot.map_or_else(|| "No image".into(), |s| s.name.clone()),
-            status_color: decision_color(decision),
+            status_color: theme::DecisionPalette::new(self.settings.colourblind).color(decision),
             status_label: decision.label(),
             key: path.clone().map(|p| {
                 if self.canvas.native() {
@@ -1523,18 +1523,14 @@ impl App {
             return;
         }
         ui.add_space(5.0);
+        let palette = theme::DecisionPalette::new(self.settings.colourblind);
         ui.add_enabled_ui(self.session.is_some(), |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 12.0;
                 theme::group(ui, |ui| {
                     for (label, command, color, fill) in [
-                        ("Keep", Command::Keep, theme::ACCENT, theme::ACCENT_BG),
-                        (
-                            "Reject",
-                            Command::Reject,
-                            theme::REJECT,
-                            egui::Color32::from_rgb(59, 39, 43),
-                        ),
+                        ("Keep", Command::Keep, palette.keep, palette.keep_bg),
+                        ("Reject", Command::Reject, palette.reject, palette.reject_bg),
                     ] {
                         let binding = COMMANDS
                             .iter()
@@ -1740,7 +1736,10 @@ impl App {
                             ) == Decision::Keep
                         })
                         .count();
-                    ui.label(egui::RichText::new(format!("{kept} kept")).color(theme::ACCENT));
+                    ui.label(
+                        egui::RichText::new(format!("{kept} kept"))
+                            .color(theme::DecisionPalette::new(self.settings.colourblind).keep),
+                    );
                 }
             });
         });
@@ -1905,6 +1904,16 @@ impl App {
                         .show(ui, |ui| {
                             match self.settings_tab {
                                 0 => {
+                                    ui.label(egui::RichText::new("Decision colours").strong());
+                                    ui.checkbox(&mut self.draft_settings.colourblind, "Colourblind-friendly colours");
+                                    let palette = theme::DecisionPalette::new(self.draft_settings.colourblind);
+                                    ui.horizontal(|ui| {
+                                        for decision in [Decision::Keep, Decision::Reject, Decision::Unreviewed] {
+                                            ui.colored_label(palette.color(decision), decision.label());
+                                        }
+                                    });
+                                    ui.label(egui::RichText::new("When enabled, Keep is blue, Reject orange and Unreviewed gray. Editing selection uses white outlines. Labels and decision icons remain visible.").small().color(theme::MUTED));
+                                    ui.separator();
                                     ui.checkbox(&mut self.draft_settings.link_raw, "Link JPEG selections to matching RAW files");
                                     ui.label(egui::RichText::new("Independent RAW choices return when linking is turned off.").small().color(theme::MUTED));
                                     ui.checkbox(&mut self.draft_settings.include_videos, "Include videos in import");
@@ -2557,13 +2566,6 @@ impl Drop for App {
         if let Some(import) = &self.import {
             import.cancel.store(true, Ordering::Relaxed);
         }
-    }
-}
-fn decision_color(decision: Decision) -> egui::Color32 {
-    match decision {
-        Decision::Keep => egui::Color32::from_rgb(93, 203, 148),
-        Decision::Reject => egui::Color32::from_rgb(232, 114, 122),
-        Decision::Unreviewed => theme::MUTED,
     }
 }
 fn optional_path(value: &str) -> Option<PathBuf> {
