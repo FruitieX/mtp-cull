@@ -256,6 +256,7 @@ mod tests {
                 colourblind: true,
                 reel_position: crate::reel::Position::Right,
                 reel_width: 420.0,
+                reel_thumbnail_size: 240.0,
                 recent_sources: sources.clone(),
                 ..Settings::default()
             });
@@ -269,6 +270,7 @@ mod tests {
                 crate::reel::Position::Right
             );
             assert_eq!(store.settings().unwrap().reel_width, 420.0);
+            assert_eq!(store.settings().unwrap().reel_thumbnail_size, 240.0);
         }
         // A pre-history settings record still loads its other preferences.
         connect(&path)

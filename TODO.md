@@ -167,3 +167,7 @@ the full viewer/focus/import/retry/resume smoke also passes. See
 - [x] Dock the reel at Bottom/Left/Right, turn side strips vertical, and remember placement and separate height/width preferences.
 - [x] Add a placement menu and Ctrl+Shift+G shortcut; adapt filters, resizing, wheel scrolling and keyboard-follow to side strips and grids.
 - [x] Verify persisted settings and virtualized side strips; exercise actual docking shortcuts, side-grid navigation and panel resizing in the native renderer.
+
+- [x] Fill side-grid width with evenly sized columns closest to the preferred thumbnail size, accounting for the scroll viewport.
+- [x] Add a live Size slider and configurable smaller/larger grid-thumbnail shortcuts; retain the preference and active photo across reflow.
+- [x] Cover nearest-size/full-width geometry and settings persistence; exercise the slider, resize edge and changed grid navigation in the native renderer.

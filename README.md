@@ -96,7 +96,12 @@ or vertically in a grid; Shift is optional. Up/Down moves between grid rows in
 the same column (the last photo is used in an incomplete row); Left/Right moves
 one photo. Up/Down moves one photo in a single strip. Navigation stops at the
 first/last row, and the reel follows the active photo.
-Settings > Review adjusts scroll speed and grid thumbnail width.
+Side grids spread their columns across the full reel width, choosing the column
+count that keeps thumbnails closest to your preferred size. Use the **Size**
+slider above the grid to adjust that preference; **Ctrl+Alt+Minus/Equals** makes
+them smaller/larger. Resizing the sidebar reflows the grid and keeps the active
+photo visible. The size preference is remembered and also available in
+Settings > Review, alongside scroll speed.
 Placement, bottom height, sidebar width and layout preferences persist.
 Right-click a thumbnail for decision/selection/pin actions, or the canvas for
 decisions and viewing tools.
@@ -180,6 +185,7 @@ the command palette. Tab/Enter/Space also operate focused UI controls.
 | Toggle active photo in reel selection | Insert |
 | Strip / grid reel | Ctrl+G |
 | Move reel: Bottom / Left / Right | Ctrl+Shift+G |
+| Smaller / larger grid thumbnails | Ctrl+Alt+Minus / Ctrl+Alt+Equals |
 | Keep / reject visible images | Ctrl+Shift+K / Ctrl+Backspace |
 | Burst grouping / previous-next burst | Ctrl+B / Ctrl+PageUp-PageDown |
 | Open folder / camera / import | Ctrl+O / Ctrl+M / Ctrl+I |

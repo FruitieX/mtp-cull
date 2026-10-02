@@ -67,6 +67,8 @@ pub enum Command {
     ToggleReelSelection,
     ReelMode,
     ReelPosition,
+    ReelSmaller,
+    ReelLarger,
     Import,
     Presets,
     Settings,
@@ -473,6 +475,18 @@ pub const COMMANDS: &[Spec] = &[
         id: "reel_position",
         label: "Move reel: Bottom / Left / Right",
         key: "Ctrl+Shift+G",
+    },
+    Spec {
+        command: Command::ReelSmaller,
+        id: "reel_smaller",
+        label: "Smaller grid thumbnails",
+        key: "Ctrl+Alt+Minus",
+    },
+    Spec {
+        command: Command::ReelLarger,
+        id: "reel_larger",
+        label: "Larger grid thumbnails",
+        key: "Ctrl+Alt+Equals",
     },
     Spec {
         command: Command::Import,

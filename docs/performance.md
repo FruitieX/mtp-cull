@@ -247,3 +247,12 @@ sidebar resize edge. It verifies that the bottom height stays independent and
 that left/right share their resized width. The October docking checks ran on a
 1024x768 Windows desktop (larger requested windows were clamped to that display).
 Only visible strip/grid cells are drawn, including in a 500-photo session.
+
+The fitted-grid follow-up passes 65 tests (two opt-in), strict Clippy and native
+500-shot input at 1024x768. Side-grid rows reach the viewport's right edge; the
+column count minimizes thumbnail-width differences from the saved preference.
+The native exercise changes density with the Size slider and shortcuts, resizes
+the sidebar, and verifies active-photo visibility and row navigation after reflow.
+Mouse release returns focus from the size slider to the culling shortcuts.
+Thumbnail decode sizes still use bounded 128-pixel buckets; GPU upload and cache
+limits are unchanged.

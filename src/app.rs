@@ -99,6 +99,8 @@ struct App {
     reel_menu_items: Vec<(Command, egui::Rect)>,
     #[cfg(feature = "ui-smoke")]
     reel_panel_bounds: egui::Rect,
+    #[cfg(feature = "ui-smoke")]
+    reel_size_slider: egui::Rect,
     pinned: Option<usize>,
     media_filter: Option<Kind>,
     decision_filter: Option<Decision>,
@@ -183,6 +185,8 @@ impl App {
             reel_menu_items: Vec::new(),
             #[cfg(feature = "ui-smoke")]
             reel_panel_bounds: egui::Rect::NOTHING,
+            #[cfg(feature = "ui-smoke")]
+            reel_size_slider: egui::Rect::NOTHING,
             pinned: None,
             media_filter: Some(Kind::Jpeg),
             decision_filter: None,
@@ -421,6 +425,15 @@ impl App {
         self.reel_layout = None;
         self.reel_follow = true;
         self.store.save_settings(&self.settings);
+    }
+    fn resize_reel_thumbnails(&mut self, delta: f32) {
+        if self.settings.reel_grid {
+            self.settings.reel_thumbnail_size =
+                (self.settings.reel_thumbnail_size + delta).clamp(100.0, 300.0);
+            self.draft_settings.reel_thumbnail_size = self.settings.reel_thumbnail_size;
+            self.reel_follow = true;
+            self.store.save_settings(&self.settings);
+        }
     }
     fn decide(&mut self, decision: Decision, bulk: bool) {
         if self.visible.is_empty() {
@@ -764,6 +777,8 @@ impl App {
                 self.store.save_settings(&self.settings);
             }
             Command::ReelPosition => self.set_reel_position(self.settings.reel_position.next()),
+            Command::ReelSmaller => self.resize_reel_thumbnails(-20.0),
+            Command::ReelLarger => self.resize_reel_thumbnails(20.0),
             Command::Import => {
                 if self.import.is_none() && !self.camera_busy && self.loader.is_none() {
                     self.import_open = true;
@@ -1665,12 +1680,18 @@ impl App {
                 self.reel_layout_controls(ui, position);
             });
             ui.horizontal_wrapped(|ui| self.reel_counts(ui));
+            if self.settings.reel_grid {
+                ui.horizontal(|ui| self.reel_thumbnail_control(ui));
+            }
         } else {
             ui.horizontal(|ui| {
                 self.media_filters(ui);
                 self.decision_filter_control(ui);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.reel_layout_controls(ui, position);
+                    if self.settings.reel_grid {
+                        self.reel_thumbnail_control(ui);
+                    }
                     self.reel_counts(ui);
                 });
             });
@@ -1752,6 +1773,38 @@ impl App {
         })
         .response
         .on_hover_text(self.button_text("Move reel", Command::ReelPosition));
+    }
+    fn reel_thumbnail_control(&mut self, ui: &mut egui::Ui) {
+        ui.scope(|ui| {
+            ui.spacing_mut().slider_width = (ui.available_width() - 45.0).clamp(100.0, 150.0);
+            let response = ui
+                .add(
+                    egui::Slider::new(&mut self.settings.reel_thumbnail_size, 100.0..=300.0)
+                        .show_value(false)
+                        .text("Size"),
+                )
+                .on_hover_text(format!(
+                    "Preferred thumbnail width. Side grids fill the reel width.\n{}\n{}",
+                    self.button_text("Smaller", Command::ReelSmaller),
+                    self.button_text("Larger", Command::ReelLarger)
+                ));
+            #[cfg(feature = "ui-smoke")]
+            {
+                self.reel_size_slider = response.rect;
+            }
+            if response.changed() {
+                self.draft_settings.reel_thumbnail_size = self.settings.reel_thumbnail_size;
+                self.reel_follow = true;
+            }
+            if response.drag_stopped() {
+                // Return mouse users to the culling shortcuts after adjusting size.
+                // Tab-focused keyboard users can still edit the slider with arrows.
+                response.surrender_focus();
+            }
+            if response.drag_stopped() || (response.changed() && !response.dragged()) {
+                self.store.save_settings(&self.settings);
+            }
+        });
     }
     fn reel_counts(&self, ui: &mut egui::Ui) {
         let palette = theme::DecisionPalette::new(self.settings.colourblind);
@@ -1973,7 +2026,8 @@ impl App {
                                             });
                                     });
                                     ui.checkbox(&mut self.draft_settings.reel_grid, "Show a grid instead of a single strip");
-                                    ui.add(egui::Slider::new(&mut self.draft_settings.reel_thumbnail_size, 100.0..=300.0).text("Grid thumbnail width"));
+                                    ui.add(egui::Slider::new(&mut self.draft_settings.reel_thumbnail_size, 100.0..=300.0).text("Preferred thumbnail width"));
+                                    ui.label(egui::RichText::new("Side grids fill the reel width while keeping thumbnails near this size. Adjust Size above the reel to change it while reviewing.").small().color(theme::MUTED));
                                     ui.add(egui::Slider::new(&mut self.draft_settings.reel_scroll_speed, 0.25..=8.0).text("Reel scroll speed"));
                                     ui.label(egui::RichText::new("Drag the edge beside the viewer to resize. The single strip scrolls horizontally at the bottom and vertically at either side. Ctrl-click selects a batch; Shift-click selects a range.").small().color(theme::MUTED));
                                     if let Some(session) = &self.session {

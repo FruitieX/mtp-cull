@@ -95,6 +95,30 @@ impl Smoke {
     }
     fn tick_reel(&mut self, app: &mut App, ctx: &egui::Context) -> Result<()> {
         let ctrl = egui::Modifiers::CTRL;
+        fn check_fitted_grid(app: &App) -> Result<()> {
+            let columns = app.reel_layout.unwrap().0;
+            let last = app
+                .reel_cells
+                .iter()
+                .find(|(i, _)| (i + 1) % columns == 0)
+                .ok_or_else(|| eyre!("side grid has no complete visible row"))?
+                .1;
+            if (last.right() - app.reel_clip.right()).abs() > 1.0 {
+                bail!(
+                    "side grid did not fill the viewport: {} vs {}",
+                    last.right(),
+                    app.reel_clip.right()
+                );
+            }
+            if !app
+                .reel_cells
+                .iter()
+                .any(|(i, r)| *i == app.selected && app.reel_clip.contains(r.center()))
+            {
+                bail!("side grid did not follow the active photo after reflow");
+            }
+            Ok(())
+        }
         match self.step {
             0 => {
                 app.canvas.verify_mipmaps()?;
@@ -558,6 +582,7 @@ impl Smoke {
                 {
                     bail!("side grid did not navigate/follow by column count");
                 }
+                check_fitted_grid(app)?;
                 self.capture(ctx, "reel-right-grid");
                 self.key(egui::Key::G, egui::Modifiers::CTRL | egui::Modifiers::SHIFT);
                 self.step = 51;
@@ -585,9 +610,119 @@ impl Smoke {
                 {
                     bail!("left/right did not share the resized sidebar width");
                 }
+                check_fitted_grid(app)?;
+                let rect = app.reel_size_slider;
+                if !rect.is_positive() {
+                    bail!("grid size slider is missing");
+                }
+                let pos = egui::pos2(rect.left() + 5.0, rect.center().y);
+                self.input.extend([
+                    egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                self.step = 53;
+            }
+            53 => {
+                if app.settings.reel_thumbnail_size >= 140.0 || app.reel_layout.unwrap().0 < 3 {
+                    bail!(
+                        "Size slider did not increase side-grid density: size {}, columns {}",
+                        app.settings.reel_thumbnail_size,
+                        app.reel_layout.unwrap().0
+                    );
+                }
+                check_fitted_grid(app)?;
+                self.capture(ctx, "reel-small-grid");
+                let pos = ctx.input(|i| i.pointer.latest_pos()).unwrap();
+                self.input.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                self.step = 60;
+            }
+            60 => {
+                for _ in 0..9 {
+                    app.command(Command::ReelLarger);
+                }
+                self.key(
+                    egui::Key::Equals,
+                    egui::Modifiers::CTRL | egui::Modifiers::ALT,
+                );
+                self.step = 54;
+            }
+            54 => {
+                if app.settings.reel_thumbnail_size != 300.0 || app.reel_layout.unwrap().0 != 1 {
+                    bail!("thumbnail size shortcut did not reduce side grid to one column");
+                }
+                check_fitted_grid(app)?;
+                self.capture(ctx, "reel-large-grid");
+                self.key(
+                    egui::Key::Minus,
+                    egui::Modifiers::CTRL | egui::Modifiers::ALT,
+                );
+                self.step = 55;
+            }
+            55 => {
+                if app.settings.reel_thumbnail_size != 280.0 {
+                    bail!("smaller-thumbnail shortcut did not adjust the preference");
+                }
+                let edge = app.reel_panel_bounds.right_center();
+                self.input.extend([
+                    egui::Event::PointerMoved(edge),
+                    egui::Event::PointerButton {
+                        pos: edge,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+                self.step = 56;
+            }
+            56 => {
+                let pos = ctx.input(|i| i.pointer.latest_pos()).unwrap() + egui::vec2(80.0, 0.0);
+                self.input.push(egui::Event::PointerMoved(pos));
+                self.step = 57;
+            }
+            57 => {
+                let pos = ctx.input(|i| i.pointer.latest_pos()).unwrap();
+                self.input.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+                self.step = 58;
+            }
+            58 => {
+                if app.reel_layout.unwrap().0 < 2 {
+                    bail!("resizing side grid did not reflow its columns");
+                }
+                check_fitted_grid(app)?;
+                self.capture(ctx, "reel-grid-resized");
+                self.key(egui::Key::ArrowDown, egui::Modifiers::NONE);
+                std::fs::write(
+                    self.root.join("selected-before.txt"),
+                    app.selected.to_string(),
+                )?;
+                self.step = 59;
+            }
+            59 => {
+                let before = std::fs::read_to_string(self.root.join("selected-before.txt"))?
+                    .parse::<usize>()?;
+                if app.selected != before + app.reel_layout.unwrap().0 {
+                    bail!("grid navigation did not use resized column count");
+                }
+                check_fitted_grid(app)?;
                 std::fs::write(
                     self.root.join("PASS.txt"),
-                    "PASS: synthetic 500-photo reel; keyboard-follow in row/grid and left/right strips; Up/Down row navigation; Ctrl-click batch; Ctrl+A selection; 1/0 batch decisions; context actions; normal-wheel scrolling; bottom/side panel resize; placement shortcut; independent bottom height; GPU checkerboard low-pass readback.\n",
+                    "PASS: synthetic 500-photo reel; keyboard-follow in row/grid and left/right strips; Up/Down row navigation; Ctrl-click batch; Ctrl+A selection; 1/0 batch decisions; context actions; normal-wheel scrolling; bottom/side panel resize; placement shortcut; independent bottom height; full-width side grids; Size slider and shortcuts; navigation after column reflow; GPU checkerboard low-pass readback.\n",
                 )?;
                 self.step = 255;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);

@@ -12,42 +12,9 @@ impl App {
         let vertical = grid || side;
         let palette = theme::DecisionPalette::new(self.settings.colourblind);
         let height = ui.available_height().max(70.0);
-        let card_width = if grid {
-            self.settings.reel_thumbnail_size.clamp(100.0, 300.0)
-        } else if side {
-            // Resizing a sidebar changes the strip's thumbnail width. Leave room
-            // for the scrollbar and the gap between cards.
-            (ui.available_width() - 24.0).clamp(100.0, 1024.0)
-        } else {
-            // Dragging the row's top edge directly changes the preview size.
-            ((height - 40.0) * 1.5).clamp(100.0, 540.0)
-        };
-        let columns = if grid {
-            (ui.available_width() / (card_width + 8.0)).floor().max(1.0) as usize
-        } else if side {
-            1
-        } else {
-            self.visible.len().max(1)
-        };
-        let layout = crate::reel::Layout {
-            columns,
-            cell: egui::vec2(
-                card_width + 8.0,
-                if vertical {
-                    card_width / 1.5 + 48.0
-                } else {
-                    height - 10.0
-                },
-            ),
-            count: self.visible.len(),
-        };
         let Some(session) = &self.session else {
             return;
         };
-        if self.reel_layout != Some((columns, layout.cell)) {
-            self.reel_follow = true;
-            self.reel_layout = Some((columns, layout.cell));
-        }
         let bindings = &self.settings.bindings;
         let button_text = |label: &str, command| {
             let key = COMMANDS
@@ -76,13 +43,38 @@ impl App {
             .animated(false)
             .wheel_scroll_multiplier(egui::Vec2::splat(self.settings.reel_scroll_speed.clamp(0.25, 8.0)))
             .show_viewport(ui, |ui, viewport| {
+                // Compute against the actual scrolling viewport, after any scrollbar
+                // space has been reserved, so complete side-grid rows fill its width.
+                let width = ui.available_width();
+                let layout = if grid && side {
+                    crate::reel::Layout::fitted_grid(width, self.settings.reel_thumbnail_size, self.visible.len())
+                } else {
+                    let card_width = if grid {
+                        self.settings.reel_thumbnail_size.clamp(100.0, 300.0)
+                    } else if side {
+                        (width - 8.0).clamp(100.0, 1024.0)
+                    } else {
+                        ((height - 40.0) * 1.5).clamp(100.0, 540.0)
+                    };
+                    let columns = if grid {
+                        (width / (card_width + 8.0)).floor().max(1.0) as usize
+                    } else if side { 1 } else { self.visible.len().max(1) };
+                    crate::reel::Layout {
+                        columns, count: self.visible.len(),
+                        cell: egui::vec2(card_width + 8.0, if vertical { card_width / 1.5 + 48.0 } else { height - 10.0 }),
+                    }
+                };
+                let columns = layout.columns;
+                let card_width = layout.cell.x - 8.0;
+                let layout_changed = self.reel_layout != Some((columns, layout.cell));
+                self.reel_layout = Some((columns, layout.cell));
                 let total = if vertical {
                     egui::vec2(ui.available_width(), self.visible.len().div_ceil(columns) as f32 * layout.cell.y)
                 } else { egui::vec2(self.visible.len() as f32 * layout.cell.x, layout.cell.y) };
                 ui.set_min_size(total);
                 let origin = ui.min_rect().min.to_vec2();
                 self.reel_viewport = viewport;
-                if follow && let Some(position) = self.visible.iter().position(|i| *i == self.selected) {
+                if (follow || layout_changed) && let Some(position) = self.visible.iter().position(|i| *i == self.selected) {
                     ui.scroll_to_rect(layout.rect(position).translate(origin), None);
                 }
                 for position in layout.range(viewport, vertical) {

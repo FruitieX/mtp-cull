@@ -81,6 +81,27 @@ pub struct Layout {
     pub count: usize,
 }
 impl Layout {
+    /// Choose the closest thumbnail width, then spread columns across the viewport.
+    /// A complete row has only the usual inter-card gaps and no unused right margin.
+    pub fn fitted_grid(width: f32, target: f32, count: usize) -> Self {
+        let width = width.max(1.0);
+        let target = target.clamp(100.0, 300.0);
+        let ideal = (width + 8.0) / (target + 8.0);
+        let fewer = ideal.floor().max(1.0) as usize;
+        let more = fewer + 1;
+        let card_width = |columns: usize| (width + 8.0) / columns as f32 - 8.0;
+        let columns = if (card_width(more) - target).abs() < (card_width(fewer) - target).abs() {
+            more
+        } else {
+            fewer
+        };
+        let card_width = card_width(columns);
+        Self {
+            columns,
+            cell: eframe::egui::vec2(card_width + 8.0, card_width / 1.5 + 48.0),
+            count,
+        }
+    }
     pub fn rect(&self, index: usize) -> eframe::egui::Rect {
         eframe::egui::Rect::from_min_size(
             eframe::egui::pos2(
@@ -106,6 +127,30 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fitted_side_grids_fill_the_viewport_and_keep_the_nearest_thumbnail_size() {
+        let grid = Layout::fitted_grid(352.0, 160.0, 500);
+        assert_eq!(grid.columns, 2);
+        assert_eq!(grid.rect(0).width(), 172.0);
+        assert_eq!(grid.rect(1).right(), 352.0);
+        // A narrow sidebar fits two previews closer to the target than one huge one.
+        assert_eq!(Layout::fitted_grid(272.0, 160.0, 500).columns, 2);
+        // Increasing the preference changes density, while preserving full width.
+        assert_eq!(Layout::fitted_grid(352.0, 100.0, 500).columns, 3);
+        assert_eq!(Layout::fitted_grid(352.0, 300.0, 500).columns, 1);
+        for width in [232.0, 272.0, 352.0, 520.0, 1000.0] {
+            for target in [100.0, 160.0, 220.0, 300.0] {
+                let grid = Layout::fitted_grid(width, target, 500);
+                assert!((grid.rect(grid.columns - 1).right() - width).abs() < 0.001);
+                let difference = (grid.rect(0).width() - target).abs();
+                for columns in 1..=12 {
+                    let alternative = (width - (columns - 1) as f32 * 8.0) / columns as f32;
+                    assert!(difference <= (alternative - target).abs() + 0.001);
+                }
+                assert!(grid.range(grid.rect(100), true).contains(&100));
+            }
+        }
+    }
     #[test]
     fn selection_toggles_ranges_and_prunes_hidden_images() {
         let mut selection = Selection::default();
