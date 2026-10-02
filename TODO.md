@@ -171,3 +171,8 @@ the full viewer/focus/import/retry/resume smoke also passes. See
 - [x] Fill side-grid width with evenly sized columns closest to the preferred thumbnail size, accounting for the scroll viewport.
 - [x] Add a live Size slider and configurable smaller/larger grid-thumbnail shortcuts; retain the preference and active photo across reflow.
 - [x] Cover nearest-size/full-width geometry and settings persistence; exercise the slider, resize edge and changed grid navigation in the native renderer.
+
+- [x] Preserve the active photo's viewport position continuously when resizing any reel layout or changing thumbnail size; retain manually scrolled views.
+- [x] Resolve scroll offsets before painting to eliminate frames combining new thumbnail geometry with the old scroll position.
+- [x] Increase the preferred thumbnail width limit from 300 to 390 px (30%).
+- [x] Add continuous native drag checks for Bottom/Left/Right in strip and grid mode, including column changes and returning to the original size.

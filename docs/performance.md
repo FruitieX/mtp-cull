@@ -256,3 +256,23 @@ the sidebar, and verifies active-photo visibility and row navigation after reflo
 Mouse release returns focus from the size slider to the culling shortcuts.
 Thumbnail decode sizes still use bounded 128-pixel buckets; GPU upload and cache
 limits are unchanged.
+
+## Continuous reel resize verification
+
+The SIMD suite passes 67 tests (two opt-in), formatting and strict Clippy with
+the native smoke feature. Regression coverage checks viewport anchoring during
+strip resizing and grid column changes, preserving manual scrolling when the
+active photo is offscreen, and keyboard follow for oversized thumbnails.
+
+Native 500-shot input checks pass at actual 2560x1440 and 1024x768 viewports.
+Each run checks 258 frames during grow/shrink drags across Bottom, Left and Right
+placements in both strip and grid modes, including sidebar column transitions.
+The active thumbnail's center stays at its original relative viewport position;
+the largest measured drift is 0.502 UI points in either run. This verifies live
+geometry stability, rather than camera throughput or presentation latency.
+
+Scroll corrections now affect painting and saved scroll state in the same frame.
+Resizing no longer requests keyboard follow, which previously aligned the active
+photo with opposite scroll edges depending on drag direction. The preferred
+thumbnail width now ranges from 100 to 390 pixels. Rendering remains virtualized;
+thumbnail decode buckets, upload caps and cache budgets are unchanged.

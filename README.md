@@ -100,8 +100,12 @@ Side grids spread their columns across the full reel width, choosing the column
 count that keeps thumbnails closest to your preferred size. Use the **Size**
 slider above the grid to adjust that preference; **Ctrl+Alt+Minus/Equals** makes
 them smaller/larger. Resizing the sidebar reflows the grid and keeps the active
-photo visible. The size preference is remembered and also available in
-Settings > Review, alongside scroll speed.
+photo at the same relative viewport position while dragging. Both strip and grid
+layouts preserve this position during resizing, without moving the photo to
+opposite scroll edges. If you have scrolled away from the active photo, resizing
+retains the photos you are viewing. The size preference ranges from 100 to 390 px
+and is remembered. It is also available in Settings > Review, alongside scroll
+speed.
 Placement, bottom height, sidebar width and layout preferences persist.
 Right-click a thumbnail for decision/selection/pin actions, or the canvas for
 decisions and viewing tools.

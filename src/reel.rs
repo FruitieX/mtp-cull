@@ -1,6 +1,9 @@
 //! Reel selection is separate from review decisions and import choices.
 use std::collections::BTreeSet;
 
+pub const MIN_THUMBNAIL_WIDTH: f32 = 100.0;
+pub const MAX_THUMBNAIL_WIDTH: f32 = 390.0;
+
 #[derive(
     Clone, Copy, Debug, Default, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize,
 )]
@@ -85,7 +88,7 @@ impl Layout {
     /// A complete row has only the usual inter-card gaps and no unused right margin.
     pub fn fitted_grid(width: f32, target: f32, count: usize) -> Self {
         let width = width.max(1.0);
-        let target = target.clamp(100.0, 300.0);
+        let target = target.clamp(MIN_THUMBNAIL_WIDTH, MAX_THUMBNAIL_WIDTH);
         let ideal = (width + 8.0) / (target + 8.0);
         let fewer = ideal.floor().max(1.0) as usize;
         let more = fewer + 1;
@@ -122,11 +125,177 @@ impl Layout {
             first.min(self.count)..end.min(self.count)
         }
     }
+    fn clamp_offset(&self, offset: f32, extent: f32, vertical: bool) -> f32 {
+        let length = if vertical {
+            self.count.div_ceil(self.columns) as f32 * self.cell.y
+        } else {
+            self.count as f32 * self.cell.x
+        };
+        offset.clamp(0.0, (length - extent).max(0.0))
+    }
+    /// Keep a visible photo at the same viewport position during reflow.
+    /// If the active photo is offscreen, preserve the leading visible photo instead.
+    pub fn reflow_offset(
+        &self,
+        previous: &Self,
+        viewport: eframe::egui::Rect,
+        size: eframe::egui::Vec2,
+        active: Option<usize>,
+        vertical: bool,
+    ) -> eframe::egui::Vec2 {
+        use eframe::egui::Vec2;
+        if self.count == 0 || previous.count == 0 {
+            return Vec2::ZERO;
+        }
+        let axis = usize::from(vertical);
+        let leading = if vertical {
+            (viewport.top() / previous.cell.y).floor().max(0.0) as usize * previous.columns
+        } else {
+            (viewport.left() / previous.cell.x).floor().max(0.0) as usize
+        };
+        let active =
+            active.filter(|i| *i < previous.count && previous.rect(*i).intersects(viewport));
+        let index = active
+            .unwrap_or(leading)
+            .min(self.count.min(previous.count) - 1);
+        let before = previous.rect(index);
+        let anchor = if active.is_some() {
+            before.center()[axis]
+        } else {
+            before.intersect(viewport).center()[axis]
+        };
+        let within_photo = ((anchor - before.min[axis]) / before.size()[axis]).clamp(0.0, 1.0);
+        let within_view =
+            ((anchor - viewport.min[axis]) / viewport.size()[axis].max(1.0)).clamp(0.0, 1.0);
+        let after = self.rect(index);
+        let offset = after.min[axis] + within_photo * after.size()[axis] - within_view * size[axis];
+        let mut result = Vec2::ZERO;
+        result[axis] = self.clamp_offset(offset, size[axis], vertical);
+        result
+    }
+    /// Resolve keyboard-follow before painting, including photos larger than the view.
+    pub fn follow_offset(
+        &self,
+        offset: eframe::egui::Vec2,
+        size: eframe::egui::Vec2,
+        index: usize,
+        vertical: bool,
+    ) -> eframe::egui::Vec2 {
+        let axis = usize::from(vertical);
+        let rect = self.rect(index).expand(2.0);
+        let start = offset[axis];
+        let next = if rect.size()[axis] > size[axis] {
+            rect.center()[axis] - size[axis] * 0.5
+        } else if rect.min[axis] < start {
+            rect.min[axis]
+        } else if rect.max[axis] > start + size[axis] {
+            rect.max[axis] - size[axis]
+        } else {
+            start
+        };
+        let mut result = eframe::egui::Vec2::ZERO;
+        result[axis] = self.clamp_offset(next, size[axis], vertical);
+        result
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reflow_keeps_the_active_photo_anchored_in_strips_and_grids() {
+        use eframe::egui::{Pos2, Rect, vec2};
+        for vertical in [false, true] {
+            let mut previous = Layout {
+                columns: if vertical { 1 } else { 500 },
+                cell: vec2(208.0, 188.0),
+                count: 500,
+            };
+            let axis = usize::from(vertical);
+            let mut size = vec2(1000.0, 600.0);
+            let mut offset = vec2(0.0, 0.0);
+            offset[axis] = previous.rect(200).center()[axis] - size[axis] * 0.65;
+            for step in (0..60).chain((0..60).rev()) {
+                let width = 200.0 + step as f32 * 4.0;
+                let next = Layout {
+                    columns: previous.columns,
+                    cell: vec2(width + 8.0, width / 1.5 + 48.0),
+                    count: 500,
+                };
+                let next_size = vec2(1000.0, 500.0 + step as f32);
+                offset = next.reflow_offset(
+                    &previous,
+                    Rect::from_min_size(Pos2::ZERO + offset, size),
+                    next_size,
+                    Some(200),
+                    vertical,
+                );
+                let screen = next.rect(200).center()[axis] - offset[axis];
+                assert!(
+                    (screen - next_size[axis] * 0.65).abs() < 1.0,
+                    "vertical={vertical}, step={step}, anchor drift={}",
+                    screen - next_size[axis] * 0.65
+                );
+                assert!(
+                    next.range(
+                        Rect::from_min_size(Pos2::ZERO + offset, next_size),
+                        vertical
+                    )
+                    .contains(&200)
+                );
+                previous = next;
+                size = next_size;
+            }
+        }
+        let mut previous = Layout::fitted_grid(352.0, 280.0, 500);
+        let mut size = vec2(352.0, 600.0);
+        let mut offset = vec2(0.0, previous.rect(200).center().y - 360.0);
+        for width in [432.0, 272.0, 620.0, 700.0, 1000.0, 290.0] {
+            let next = Layout::fitted_grid(width, 280.0, 500);
+            let next_size = vec2(width, 550.0);
+            offset = next.reflow_offset(
+                &previous,
+                Rect::from_min_size(Pos2::ZERO + offset, size),
+                next_size,
+                Some(200),
+                true,
+            );
+            assert!((next.rect(200).center().y - offset.y - next_size.y * 0.6).abs() < 0.03);
+            previous = next;
+            size = next_size;
+        }
+    }
+    #[test]
+    fn reflow_preserves_manual_scrolling_and_keyboard_follow_handles_clipped_photos() {
+        use eframe::egui::{Pos2, Rect, pos2, vec2};
+        let previous = Layout {
+            columns: 500,
+            cell: vec2(200.0, 100.0),
+            count: 500,
+        };
+        let next = Layout {
+            cell: vec2(400.0, 220.0),
+            ..previous
+        };
+        let size = vec2(1000.0, 200.0);
+        let view = Rect::from_min_size(pos2(5000.0, 0.0), size);
+        let offset = next.reflow_offset(&previous, view, size, Some(200), false);
+        let resized = Rect::from_min_size(Pos2::ZERO + offset, size);
+        assert!(next.range(resized, false).contains(&25));
+        assert!(
+            !next.range(resized, false).contains(&200),
+            "resize must not undo manual scrolling"
+        );
+        let grid = Layout {
+            columns: 1,
+            cell: vec2(300.0, 350.0),
+            count: 500,
+        };
+        let size = vec2(300.0, 140.0);
+        let offset = grid.follow_offset(vec2(0.0, 0.0), size, 200, true);
+        assert!((grid.rect(200).center().y - offset.y - 70.0).abs() < 0.01);
+        assert_eq!(grid.follow_offset(offset, size, 0, true).y, 101.0);
+    }
     #[test]
     fn fitted_side_grids_fill_the_viewport_and_keep_the_nearest_thumbnail_size() {
         let grid = Layout::fitted_grid(352.0, 160.0, 500);
@@ -138,8 +307,13 @@ mod tests {
         // Increasing the preference changes density, while preserving full width.
         assert_eq!(Layout::fitted_grid(352.0, 100.0, 500).columns, 3);
         assert_eq!(Layout::fitted_grid(352.0, 300.0, 500).columns, 1);
+        assert_eq!(Layout::fitted_grid(480.0, 300.0, 500).columns, 2);
+        assert_eq!(
+            Layout::fitted_grid(480.0, MAX_THUMBNAIL_WIDTH, 500).columns,
+            1
+        );
         for width in [232.0, 272.0, 352.0, 520.0, 1000.0] {
-            for target in [100.0, 160.0, 220.0, 300.0] {
+            for target in [100.0, 160.0, 220.0, 300.0, 390.0] {
                 let grid = Layout::fitted_grid(width, target, 500);
                 assert!((grid.rect(grid.columns - 1).right() - width).abs() < 0.001);
                 let difference = (grid.rect(0).width() - target).abs();

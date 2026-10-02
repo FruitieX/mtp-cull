@@ -50,7 +50,7 @@ impl App {
                     crate::reel::Layout::fitted_grid(width, self.settings.reel_thumbnail_size, self.visible.len())
                 } else {
                     let card_width = if grid {
-                        self.settings.reel_thumbnail_size.clamp(100.0, 300.0)
+                        self.settings.reel_thumbnail_size.clamp(crate::reel::MIN_THUMBNAIL_WIDTH, crate::reel::MAX_THUMBNAIL_WIDTH)
                     } else if side {
                         (width - 8.0).clamp(100.0, 1024.0)
                     } else {
@@ -66,17 +66,28 @@ impl App {
                 };
                 let columns = layout.columns;
                 let card_width = layout.cell.x - 8.0;
-                let layout_changed = self.reel_layout != Some((columns, layout.cell));
+                let previous = self.reel_layout;
+                let geometry_changed = previous != Some((columns, layout.cell)) || self.reel_viewport.size() != viewport.size();
+                let active = self.visible.iter().position(|i| *i == self.selected);
+                let mut offset = viewport.min.to_vec2();
+                if follow {
+                    if let Some(index) = active { offset = layout.follow_offset(offset, viewport.size(), index, vertical); }
+                } else if geometry_changed && let Some((columns, cell)) = previous {
+                    let previous = crate::reel::Layout { columns, cell, count: layout.count };
+                    offset = layout.reflow_offset(&previous, self.reel_viewport, viewport.size(), active, vertical);
+                }
                 self.reel_layout = Some((columns, layout.cell));
                 let total = if vertical {
                     egui::vec2(ui.available_width(), self.visible.len().div_ceil(columns) as f32 * layout.cell.y)
                 } else { egui::vec2(self.visible.len() as f32 * layout.cell.x, layout.cell.y) };
                 ui.set_min_size(total);
-                let origin = ui.min_rect().min.to_vec2();
-                self.reel_viewport = viewport;
-                if (follow || layout_changed) && let Some(position) = self.visible.iter().position(|i| *i == self.selected) {
-                    ui.scroll_to_rect(layout.rect(position).translate(origin), None);
-                }
+                // Paint with the new offset immediately; egui applies the matching
+                // state change at the end of the scroll area. This avoids a frame
+                // with the new card geometry and the old scroll position.
+                let correction = viewport.min.to_vec2() - offset;
+                ui.scroll_with_delta(correction);
+                let origin = ui.min_rect().min.to_vec2() + correction;
+                let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO + offset, viewport.size());
                 for position in layout.range(viewport, vertical) {
                     let index = self.visible[position];
                     let shot = &session.shots[index];

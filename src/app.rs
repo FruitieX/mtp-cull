@@ -428,10 +428,11 @@ impl App {
     }
     fn resize_reel_thumbnails(&mut self, delta: f32) {
         if self.settings.reel_grid {
-            self.settings.reel_thumbnail_size =
-                (self.settings.reel_thumbnail_size + delta).clamp(100.0, 300.0);
+            self.settings.reel_thumbnail_size = (self.settings.reel_thumbnail_size + delta).clamp(
+                crate::reel::MIN_THUMBNAIL_WIDTH,
+                crate::reel::MAX_THUMBNAIL_WIDTH,
+            );
             self.draft_settings.reel_thumbnail_size = self.settings.reel_thumbnail_size;
-            self.reel_follow = true;
             self.store.save_settings(&self.settings);
         }
     }
@@ -1779,9 +1780,12 @@ impl App {
             ui.spacing_mut().slider_width = (ui.available_width() - 45.0).clamp(100.0, 150.0);
             let response = ui
                 .add(
-                    egui::Slider::new(&mut self.settings.reel_thumbnail_size, 100.0..=300.0)
-                        .show_value(false)
-                        .text("Size"),
+                    egui::Slider::new(
+                        &mut self.settings.reel_thumbnail_size,
+                        crate::reel::MIN_THUMBNAIL_WIDTH..=crate::reel::MAX_THUMBNAIL_WIDTH,
+                    )
+                    .show_value(false)
+                    .text("Size"),
                 )
                 .on_hover_text(format!(
                     "Preferred thumbnail width. Side grids fill the reel width.\n{}\n{}",
@@ -1794,7 +1798,6 @@ impl App {
             }
             if response.changed() {
                 self.draft_settings.reel_thumbnail_size = self.settings.reel_thumbnail_size;
-                self.reel_follow = true;
             }
             if response.drag_stopped() {
                 // Return mouse users to the culling shortcuts after adjusting size.
@@ -2026,7 +2029,7 @@ impl App {
                                             });
                                     });
                                     ui.checkbox(&mut self.draft_settings.reel_grid, "Show a grid instead of a single strip");
-                                    ui.add(egui::Slider::new(&mut self.draft_settings.reel_thumbnail_size, 100.0..=300.0).text("Preferred thumbnail width"));
+                                    ui.add(egui::Slider::new(&mut self.draft_settings.reel_thumbnail_size, crate::reel::MIN_THUMBNAIL_WIDTH..=crate::reel::MAX_THUMBNAIL_WIDTH).text("Preferred thumbnail width"));
                                     ui.label(egui::RichText::new("Side grids fill the reel width while keeping thumbnails near this size. Adjust Size above the reel to change it while reviewing.").small().color(theme::MUTED));
                                     ui.add(egui::Slider::new(&mut self.draft_settings.reel_scroll_speed, 0.25..=8.0).text("Reel scroll speed"));
                                     ui.label(egui::RichText::new("Drag the edge beside the viewer to resize. The single strip scrolls horizontally at the bottom and vertically at either side. Ctrl-click selects a batch; Shift-click selects a range.").small().color(theme::MUTED));

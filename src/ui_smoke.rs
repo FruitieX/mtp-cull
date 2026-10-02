@@ -3,6 +3,119 @@ use super::*;
 use color_eyre::eyre::{bail, eyre};
 use std::collections::BTreeSet;
 const REEL_SHOTS: usize = 500;
+#[derive(Default)]
+struct ResizeProbe {
+    case: usize,
+    phase: usize,
+    edge: egui::Pos2,
+    anchor: f32,
+    samples: Vec<String>,
+}
+impl ResizeProbe {
+    fn tick(
+        &mut self,
+        app: &mut App,
+        input: &mut Vec<egui::Event>,
+        root: &std::path::Path,
+    ) -> Result<bool> {
+        let position = Position::ALL[self.case / 2];
+        let grid = self.case % 2 == 1;
+        let vertical = position.is_side() || grid;
+        let axis = usize::from(vertical);
+        match self.phase {
+            0 => {
+                app.set_reel_position(position);
+                app.settings.reel_grid = grid;
+                app.settings.reel_thumbnail_size = 280.0;
+                app.selected = 200;
+                app.reel_selection.single(200);
+                app.reel_follow = true;
+                input.push(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+            }
+            1..=5 => {}
+            6 => {
+                let rect = app
+                    .reel_cells
+                    .iter()
+                    .find(|(i, _)| *i == 200)
+                    .ok_or_else(|| eyre!("resize probe could not find active photo"))?
+                    .1;
+                self.anchor =
+                    (rect.center()[axis] - app.reel_clip.min[axis]) / app.reel_clip.size()[axis];
+                self.edge = match position {
+                    Position::Bottom => app.reel_panel_bounds.center_top(),
+                    Position::Left => app.reel_panel_bounds.right_center(),
+                    Position::Right => app.reel_panel_bounds.left_center(),
+                };
+                input.extend([
+                    egui::Event::PointerMoved(self.edge),
+                    egui::Event::PointerButton {
+                        pos: self.edge,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ]);
+            }
+            7..=49 => {
+                let selected = app
+                    .reel_cells
+                    .iter()
+                    .find(|(i, _)| *i == 200)
+                    .map(|(_, r)| r.center()[axis]);
+                let expected = app.reel_clip.min[axis] + self.anchor * app.reel_clip.size()[axis];
+                let drift = selected.map(|actual| actual - expected);
+                self.samples.push(format!(
+                    "{position:?},{grid},{},{:?},{},{},{:?}",
+                    self.phase,
+                    app.reel_panel_bounds.size(),
+                    app.reel_viewport.min[axis],
+                    expected,
+                    drift
+                ));
+                std::fs::write(root.join("resize-trace.csv"), self.samples.join("\n"))?;
+                if drift.is_none_or(|d| d.abs() > 2.5) {
+                    bail!(
+                        "live resize jumped in {position:?} / grid={grid} / frame {}: drift {drift:?}",
+                        self.phase
+                    );
+                }
+                if self.phase < 47 {
+                    let step = self.phase - 6;
+                    let distance = if step <= 20 { step } else { 40 - step } as f32 * 4.0;
+                    let delta = match position {
+                        Position::Bottom => egui::vec2(0.0, -distance),
+                        Position::Left => egui::vec2(-distance, 0.0),
+                        Position::Right => egui::vec2(distance, 0.0),
+                    };
+                    input.push(egui::Event::PointerMoved(self.edge + delta));
+                } else if self.phase == 47 {
+                    input.push(egui::Event::PointerButton {
+                        pos: self.edge,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                } else if self.phase == 49 {
+                    self.case += 1;
+                    self.phase = 0;
+                    if self.case == 6 {
+                        for _ in 0..6 {
+                            app.command(Command::ReelLarger);
+                        }
+                        if app.settings.reel_thumbnail_size != crate::reel::MAX_THUMBNAIL_WIDTH {
+                            bail!("size commands did not reach the expanded thumbnail limit");
+                        }
+                    }
+                    return Ok(self.case == 6);
+                }
+            }
+            _ => bail!("invalid resize probe phase"),
+        }
+        self.phase += 1;
+        Ok(false)
+    }
+}
 pub(super) struct Smoke {
     pub blink: bool,
     pub input: Vec<egui::Event>,
@@ -14,6 +127,7 @@ pub(super) struct Smoke {
     received: BTreeSet<String>,
     samples: Vec<f64>,
     warm_uploads: u64,
+    resize_probe: Option<ResizeProbe>,
 }
 impl Smoke {
     pub fn input_ready(&self) -> bool {
@@ -41,6 +155,7 @@ impl Smoke {
             received: BTreeSet::new(),
             samples: Vec::new(),
             warm_uploads: 0,
+            resize_probe: None,
             blink: false,
             input: Vec::new(),
         }))
@@ -720,12 +835,8 @@ impl Smoke {
                     bail!("grid navigation did not use resized column count");
                 }
                 check_fitted_grid(app)?;
-                std::fs::write(
-                    self.root.join("PASS.txt"),
-                    "PASS: synthetic 500-photo reel; keyboard-follow in row/grid and left/right strips; Up/Down row navigation; Ctrl-click batch; Ctrl+A selection; 1/0 batch decisions; context actions; normal-wheel scrolling; bottom/side panel resize; placement shortcut; independent bottom height; full-width side grids; Size slider and shortcuts; navigation after column reflow; GPU checkerboard low-pass readback.\n",
-                )?;
-                self.step = 255;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                self.resize_probe = Some(ResizeProbe::default());
+                self.step = 61;
             }
             _ => bail!("invalid reel smoke step"),
         }
@@ -776,6 +887,20 @@ impl Smoke {
             return Ok(());
         }
         self.waiting = None;
+        if let Some(mut probe) = self.resize_probe.take() {
+            ctx.request_repaint_after(Duration::from_millis(5));
+            if probe.tick(app, &mut self.input, &self.root)? {
+                std::fs::write(
+                    self.root.join("PASS.txt"),
+                    "PASS: 500-photo reel; native input, batch decisions, menus, wheel, full-width grids, size controls; every-frame resize anchoring in Bottom/Left/Right strip and grid; GPU low-pass readback.\n",
+                )?;
+                self.step = 255;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                self.resize_probe = Some(probe);
+            }
+            return Ok(());
+        }
         self.frames += 1;
         ctx.request_repaint_after(Duration::from_millis(5));
         if app.loader.is_some() || app.cache.pending() || self.frames < 4 {
