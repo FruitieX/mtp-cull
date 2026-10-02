@@ -118,6 +118,14 @@ struct Texture {
     handle: ImageTexture,
     bytes: usize,
     tick: u64,
+    source_size: [usize; 2],
+}
+
+struct Preview {
+    key: Key,
+    id: egui::TextureId,
+    source_size: [usize; 2],
+    picture: Option<Arc<Picture>>,
 }
 enum ImageTexture {
     Managed(egui::TextureHandle),
@@ -153,10 +161,13 @@ pub struct Canvas {
     #[cfg(feature = "ui-smoke")]
     pub pane_rects: Vec<(bool, Rect)>,
     #[cfg(feature = "ui-smoke")]
+    pub previews: Vec<(bool, Key)>,
+    #[cfg(feature = "ui-smoke")]
     pub menu_items: Vec<(crate::review_commands::Command, Rect)>,
     #[cfg(feature = "ui-smoke")]
     pub texture_uploads: u64,
     textures: HashMap<Key, Texture>,
+    displayed: HashSet<Key>,
     overlays: HashMap<Key, Overlay>,
     tick: u64,
     budget: usize,
@@ -184,10 +195,13 @@ impl Default for Canvas {
             #[cfg(feature = "ui-smoke")]
             pane_rects: Vec::new(),
             #[cfg(feature = "ui-smoke")]
+            previews: Vec::new(),
+            #[cfg(feature = "ui-smoke")]
             menu_items: Vec::new(),
             #[cfg(feature = "ui-smoke")]
             texture_uploads: 0,
             textures: HashMap::new(),
+            displayed: HashSet::new(),
             overlays: HashMap::new(),
             tick: 0,
             budget: 512 * 1024 * 1024,
@@ -272,10 +286,12 @@ impl Canvas {
         self.uploads_left = 2;
         self.upload_bytes_left = 32 * 1024 * 1024;
         self.uploaded = false;
+        self.displayed.clear();
         self.context_command = None;
         #[cfg(feature = "ui-smoke")]
         {
             self.pane_rects.clear();
+            self.previews.clear();
             self.menu_items.clear();
         }
         let size = ui.available_size().max(egui::vec2(1.0, 1.0));
@@ -289,6 +305,16 @@ impl Canvas {
             }
             if let Some(key) = &image.fallback {
                 pins.insert(key.clone());
+            }
+            // Small uploads get both comparison panes visible before a native
+            // upload can consume this frame's byte allowance.
+            if let Some(key) = &image.key
+                && !self.textures.contains_key(key)
+            {
+                let quick = Key::fit(key.path.clone(), crate::image_cache::QUICK_PREVIEW_EDGE);
+                if let Some(picture) = cache.get(&quick) {
+                    let _ = self.texture(ui.ctx(), &quick, &picture, false);
+                }
             }
         }
         let active_a = self.active_a;
@@ -359,7 +385,7 @@ impl Canvas {
             let victim = self
                 .textures
                 .iter()
-                .filter(|(key, _)| !pins.contains(*key))
+                .filter(|(key, _)| !pins.contains(*key) && !self.displayed.contains(*key))
                 .min_by_key(|(_, t)| t.tick)
                 .map(|(key, _)| key.clone());
             if let Some(key) = victim {
@@ -402,21 +428,7 @@ impl Canvas {
             );
             return;
         };
-        let picture = cache
-            .get(key)
-            .map(|p| (key.clone(), p, true))
-            .or_else(|| {
-                key.analyze
-                    .then(|| Key::native(key.path.clone()))
-                    .and_then(|k| cache.get(&k).map(|p| (k, p, false)))
-            })
-            .or_else(|| {
-                image
-                    .fallback
-                    .as_ref()
-                    .and_then(|k| cache.get(k).map(|p| (k.clone(), p, false)))
-            });
-        let Some((loaded, picture, native_ready)) = picture else {
+        let Some(preview) = self.preview(ui.ctx(), cache, key, image.fallback.as_ref()) else {
             status_border(clip);
             let text = cache.failure(key).unwrap_or("Loading preview…");
             painter.text(
@@ -428,9 +440,14 @@ impl Canvas {
             );
             return;
         };
-        let source = egui::vec2(picture.source_size[0] as f32, picture.source_size[1] as f32);
+        let loaded = preview.key;
+        let native_ready = loaded == *key;
+        self.displayed.insert(loaded.clone());
+        #[cfg(feature = "ui-smoke")]
+        self.previews.push((b, loaded.clone()));
+        let source = egui::vec2(preview.source_size[0] as f32, preview.source_size[1] as f32);
         if b && self.center_region_on_load {
-            self.center_region(picture.source_size);
+            self.center_region(preview.source_size);
         }
         let dpi = ui.ctx().pixels_per_point();
         let response = ui.interact(
@@ -538,17 +555,15 @@ impl Canvas {
             self.drag_region_start = None;
         }
         let image_rect = self.viewport.image_rect(rect, source, dpi, b);
-        if let Some(texture) = self.texture(ui.ctx(), &loaded, &picture, false) {
-            painter.image(
-                texture,
-                image_rect,
-                Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
-        }
+        painter.image(
+            preview.id,
+            image_rect,
+            Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
         if self.peaking
             && native_ready
-            && let Some(focus) = &picture.focus
+            && let Some(focus) = preview.picture.as_ref().and_then(|p| p.focus.as_ref())
         {
             let refresh = self
                 .overlays
@@ -585,6 +600,8 @@ impl Canvas {
         }
         if self.native() && !native_ready {
             text.push_str(" · Loading full-resolution image…");
+        } else if !native_ready {
+            text.push_str(" · Loading sharper preview…");
         }
         if let Some(region) = self.region {
             let region = region.translate(alignment);
@@ -600,7 +617,9 @@ impl Canvas {
             );
             if !Rect::from_min_size(Pos2::ZERO, source).contains_rect(region) {
                 text.push_str(" · region outside image");
-            } else if native_ready && let Some(focus) = &picture.focus {
+            } else if native_ready
+                && let Some(focus) = preview.picture.as_ref().and_then(|p| p.focus.as_ref())
+            {
                 text.push_str(&format!(" · region {:.1}", focus.score(region)));
             }
         }
@@ -621,6 +640,75 @@ impl Canvas {
         // Wipe panes each outline their own clipped portion in the same color
         // as their filmstrip card, including while holding A/B blink.
         status_border(image_rect.intersect(clip));
+    }
+    fn preview(
+        &mut self,
+        ctx: &egui::Context,
+        cache: &mut ImageCache,
+        key: &Key,
+        fallback: Option<&Key>,
+    ) -> Option<Preview> {
+        if let Some(texture) = self.textures.get_mut(key) {
+            self.tick += 1;
+            texture.tick = self.tick;
+            return Some(Preview {
+                key: key.clone(),
+                id: texture.handle.id(),
+                source_size: texture.source_size,
+                picture: cache.get(key),
+            });
+        }
+        let picture = cache
+            .get(key)
+            .map(|p| (key.clone(), p))
+            .or_else(|| {
+                key.analyze
+                    .then(|| Key::native(key.path.clone()))
+                    .and_then(|k| cache.get(&k).map(|p| (k, p)))
+            })
+            .or_else(|| fallback.and_then(|k| cache.get(k).map(|p| (k.clone(), p))))
+            .or_else(|| cache.preview(key, false));
+        let resident = self
+            .textures
+            .keys()
+            .filter_map(|candidate| {
+                candidate
+                    .preview_rank(key, false)
+                    .map(|rank| (candidate.clone(), rank))
+            })
+            .max_by_key(|(_, rank)| *rank);
+        let decoded_rank = picture
+            .as_ref()
+            .and_then(|(loaded, _)| loaded.preview_rank(key, false));
+        if let Some((loaded, rank)) = &resident
+            && decoded_rank.is_none_or(|decoded| *rank >= decoded)
+        {
+            return self.resident_preview(cache, loaded);
+        }
+        if let Some((loaded, picture)) = picture
+            && let Some(id) = self.texture(ctx, &loaded, &picture, false)
+        {
+            return Some(Preview {
+                key: loaded,
+                id,
+                source_size: picture.source_size,
+                picture: Some(picture),
+            });
+        }
+        // Reuse already uploaded pixels even if their CPU buffer was evicted or
+        // a sharper texture has to wait for the per-frame upload limit.
+        self.resident_preview(cache, &resident?.0)
+    }
+    fn resident_preview(&mut self, cache: &mut ImageCache, loaded: &Key) -> Option<Preview> {
+        self.tick += 1;
+        let texture = self.textures.get_mut(loaded)?;
+        texture.tick = self.tick;
+        Some(Preview {
+            id: texture.handle.id(),
+            source_size: texture.source_size,
+            picture: cache.get(loaded),
+            key: loaded.clone(),
+        })
     }
     fn texture(
         &mut self,
@@ -673,6 +761,7 @@ impl Canvas {
                 handle,
                 bytes: resident_bytes,
                 tick: self.tick,
+                source_size: picture.source_size,
             },
         );
         Some(id)
@@ -697,6 +786,40 @@ impl Canvas {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resident_preview_survives_cpu_eviction_and_upload_deferral_without_changing_geometry() {
+        let ctx = egui::Context::default();
+        let picture = Arc::new(Picture {
+            image: Arc::new(egui::ColorImage::filled([128, 85], Color32::GRAY)),
+            source_size: [6000, 4000],
+            focus: None,
+            decode_time: std::time::Duration::ZERO,
+            feature: Default::default(),
+        });
+        let low = Key::fit("A.JPG".into(), 128);
+        let mut canvas = Canvas {
+            uploads_left: 1,
+            upload_bytes_left: usize::MAX,
+            ..Default::default()
+        };
+        let id = canvas.texture(&ctx, &low, &picture, false).unwrap();
+        canvas.uploads_left = 0;
+        let mut cache = ImageCache::new(64 * 1024 * 1024);
+        let requested = Key::focus("A.JPG".into());
+        let displayed = canvas.preview(&ctx, &mut cache, &requested, None).unwrap();
+        assert_eq!(displayed.id, id);
+        assert_eq!(displayed.key, low);
+        assert_eq!(displayed.source_size, [6000, 4000]);
+        assert_ne!(
+            displayed.key, requested,
+            "a quick preview cannot supply native focus evidence"
+        );
+        assert!(
+            canvas
+                .preview(&ctx, &mut cache, &Key::native("B.JPG".into()), None)
+                .is_none()
+        );
+    }
     #[test]
     fn speculative_uploads_include_mips_and_never_overfill_the_cache() {
         let ctx = egui::Context::default();

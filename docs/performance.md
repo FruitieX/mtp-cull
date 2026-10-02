@@ -282,3 +282,46 @@ and strict Clippy pass; closest-size/full-width coverage includes 1440- and
 2560-point widths. Native 500-shot runs at 2560x1440 and 1024x768 verify that the
 bottom grid's complete rows reach the viewport edge, then pass keyboard row
 navigation and the continuous resize checks for all placements.
+
+## Progressive previews and compact controls
+
+Quick 128-pixel decodes precede larger requests at the same priority. Demand is
+sorted before deduplication and the 128-job cap, so visible previews cannot be
+crowded out by background burst analysis. Exact cached sizes remain a constant
+time lookup; fallback sizes are matched by source path. Reel fallbacks exclude
+large/native buffers, retain the existing upload/cache caps and stay pinned while
+visible. Resizing draws the previous texture until the new bucket is ready.
+
+The viewer retains original source dimensions with GPU textures, so decoded
+preview size does not change zoom, pan or alignment. Both comparison panes get
+small uploads before a native upload consumes the frame allowance. Resident
+textures remain usable after CPU eviction or when a sharper upload is deferred.
+Only the requested native analysis supplies focus overlays and region scores.
+First previews still require an available local/staged JPEG; this does not fetch
+device thumbnails before camera staging completes.
+
+The SIMD suite passes 71 tests (two opt-in), formatting and strict Clippy with
+the native smoke feature. Native 2560x1440 and 1024x768 runs pass progressive
+side-by-side/wipe previews, correct photo identity, native upgrades, CPU eviction
+and old-to-new reel textures during resizing. A separate compact run verifies
+the 260-point minimum sidebar. The progressive smoke temporarily holds larger
+decode requests to verify the low-resolution frames deterministically:
+
+```powershell
+$env:MTP_CULL_SMOKE_DIR = "$PWD/target/progressive-smoke-new-run"
+$env:MTP_CULL_DATA_DIR = "$env:MTP_CULL_SMOKE_DIR/data"
+$env:MTP_CULL_SMOKE_PREVIEWS = '1'
+./target/release/mtp-cull.exe ui --source "$PWD/target/review-fixtures"
+```
+
+Build with `scripts/build-windows.ps1 -Smoke` first; production packages omit
+this test machinery. The 500-shot reel inputs pass at both viewport sizes with
+the compact controls, including continuous resize anchoring. The full 1440p
+viewer/focus/import/retry/resume smoke also passes and confirms 64 warmed native
+comparison frames without repeated texture uploads. Its 117 warm UI CPU samples
+have median/p95/maximum 0.282/0.458/2.672 ms; presentation and input latency are
+excluded.
+
+Sidebar media/decision filters and the strip/grid toggle share one row; position
+and size share another. Review counts live in the footer. Preview retry appears
+after failures, and cache/frame diagnostics are in Settings > Performance.

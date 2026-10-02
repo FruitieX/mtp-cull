@@ -25,6 +25,10 @@ Use a release build for photo review. Plain `cargo run` builds unoptimized code;
 decoding and resizing camera JPEGs can then take long enough to look stuck.
 Staged camera originals and review decisions persist, but decoded CPU/GPU
 previews and thumbnails are rebuilt in memory after each launch.
+Small previews appear first and sharpen as larger versions load. Resizing the
+reel reuses its cached thumbnails until the requested size is ready. Comparisons
+retain their available pixels while native images upload; focus overlays and
+scores wait for full-resolution analysis.
 
 Running the binary without arguments opens the UI, including when double-clicked
 in Windows. UI launch closes its Explorer-created console; launches from an
@@ -73,8 +77,11 @@ The MTP CLI commands support Windows and Linux through the same device worker.
 
 The toolbar groups decisions, pin/swap, comparison mode, zoom and focus tools.
 Media and decision filters sit above the filmstrip. **More** opens Settings,
-keyboard help and the command palette; **Performance** in the footer shows cache
-and frame diagnostics. Settings has separate Review, Performance and Shortcuts tabs.
+keyboard help and the command palette. Settings has separate Review, Performance
+and Shortcuts tabs; **Performance > Live diagnostics** shows cache and frame
+statistics. The footer shows review counts and staging progress. **Retry previews**
+appears only after a preview decode or camera staging failure. Decisions save
+automatically.
 
 The reel follows the active photo when navigating with the arrow keys. Ctrl-click
 toggles photos in a batch; Shift-click selects a range (Ctrl+Shift adds a range).
@@ -86,12 +93,14 @@ Filtering drops hidden photos from the editing selection. When comparison pane A
 is active, decision commands apply to A instead of the reel batch. Import still
 copies all Keep decisions, independently of the current editing selection.
 
-Choose **Reel > Bottom / Left / Right** above the thumbnails to move the reel;
+Choose **Position > Bottom / Left / Right** above the thumbnails to move the reel;
 **Ctrl+Shift+G** cycles the three positions. Settings > Review also controls placement.
 A single strip runs left/right at the bottom and top/bottom on either side.
 Drag its edge facing the viewer to resize it; strip thumbnails grow with the panel.
-**Grid** (Ctrl+G) switches to a grid with vertical scrolling; **Row** (bottom) or
-**Strip** (side) returns to a single strip. A normal wheel scrolls along the strip,
+**Grid** (Ctrl+G) switches to a grid with vertical scrolling; **Strip** returns to
+a single strip. Sidebars use a compact strip/grid icon alongside the media and
+decision filters, with position and thumbnail size on the second row.
+A normal wheel scrolls along the strip,
 or vertically in a grid; Shift is optional. Up/Down moves between grid rows in
 the same column (the last photo is used in an incomplete row); Left/Right moves
 one photo. Up/Down moves one photo in a single strip. Navigation stops at the

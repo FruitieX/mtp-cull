@@ -5,6 +5,7 @@ impl App {
         #[cfg(feature = "ui-smoke")]
         {
             self.reel_cells.clear();
+            self.reel_previews.clear();
             self.reel_menu_items.clear();
         }
         let grid = self.settings.reel_grid;
@@ -142,15 +143,25 @@ impl App {
                         self.thumbnail_tick += 1;
                         self.thumbnail_ticks.insert(key.clone(), self.thumbnail_tick);
                         self.demands.push((key.clone(), 3));
-                        if !self.thumbnails.contains_key(&key) && let Some(picture) = self.cache.get(&key) {
+                        self.demands.push((Key::fit(path.to_owned(), crate::image_cache::QUICK_PREVIEW_EDGE), 3));
+                        if !self.thumbnails.contains_key(&key) && let Some((loaded, picture)) = self.cache.preview(&key, true)
+                            && let Some(rank) = loaded.preview_rank(&key, true)
+                            && !self.thumbnails.keys().any(|candidate| candidate.preview_rank(&key, true).is_some_and(|candidate_rank| candidate_rank >= rank)) {
                             let bytes = picture.image.pixels.len() * 4;
                             if uploaded < 4 && upload_bytes + bytes <= 8 * 1024 * 1024 {
-                                self.thumbnails.insert(key.clone(), ui.ctx().load_texture(format!("thumb:{}:{edge}", path.display()), picture.image.clone(), egui::TextureOptions::LINEAR));
+                                self.thumbnails.insert(loaded, ui.ctx().load_texture(format!("thumb:{}:{edge}", path.display()), picture.image.clone(), egui::TextureOptions::LINEAR));
                                 uploaded += 1;
                                 upload_bytes += bytes;
                             } else { ui.ctx().request_repaint(); }
                         }
-                        if let Some(texture) = self.thumbnails.get(&key) {
+                        let displayed = if self.thumbnails.contains_key(&key) { Some(key.clone()) } else { self.thumbnails.keys()
+                            .filter_map(|candidate| candidate.preview_rank(&key, true).map(|rank| (candidate, rank)))
+                            .max_by_key(|(_, rank)| *rank).map(|(candidate, _)| candidate.clone()) };
+                        if let Some(displayed) = displayed && let Some(texture) = self.thumbnails.get(&displayed) {
+                            #[cfg(feature = "ui-smoke")]
+                            self.reel_previews.push((index, displayed.clone()));
+                            pins.insert(displayed.clone());
+                            self.thumbnail_ticks.insert(displayed, self.thumbnail_tick);
                             let area = egui::Rect::from_min_max(rect.min + egui::vec2(6.0, 6.0), rect.max - egui::vec2(6.0, 40.0));
                             let size = texture.size_vec2();
                             let scale = (area.width() / size.x).min(area.height() / size.y);

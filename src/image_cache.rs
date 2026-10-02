@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+pub const QUICK_PREVIEW_EDGE: u32 = 128;
+
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct Key {
     pub path: PathBuf,
@@ -14,6 +16,13 @@ pub struct Key {
     pub analyze: bool,
 }
 impl Key {
+    /// Reuse only this file's pixels. Reel uploads exclude large/native buffers.
+    pub fn preview_rank(&self, requested: &Self, thumbnail: bool) -> Option<(bool, u32)> {
+        if self.path != requested.path || (thumbnail && self.edge.is_none_or(|edge| edge > 1024)) {
+            return None;
+        }
+        Some((self == requested, self.edge.unwrap_or(u32::MAX)))
+    }
     fn tier(&self) -> usize {
         match self.edge {
             Some(edge) if edge <= 256 => 0,
@@ -191,6 +200,25 @@ impl ImageCache {
     pub fn failure(&self, key: &Key) -> Option<&str> {
         self.failures.get(key).map(String::as_str)
     }
+    pub fn has_failures(&self) -> bool {
+        !self.failures.is_empty()
+    }
+    pub fn preview(&mut self, key: &Key, thumbnail: bool) -> Option<(Key, Arc<Picture>)> {
+        if self.entries.contains_key(key) {
+            return self.get(key).map(|picture| (key.clone(), picture));
+        }
+        let best = self
+            .entries
+            .keys()
+            .filter_map(|candidate| {
+                candidate
+                    .preview_rank(key, thumbnail)
+                    .map(|rank| (candidate, rank))
+            })
+            .max_by_key(|(_, rank)| *rank)
+            .map(|(candidate, _)| candidate.clone())?;
+        self.get(&best).map(|picture| (best, picture))
+    }
     pub fn feature(&self, key: &Key) -> Option<crate::bursts::Feature> {
         self.entries.get(key).map(|e| e.picture.feature)
     }
@@ -252,7 +280,11 @@ impl ImageCache {
         }
     }
     /// Replace demand, so a jump immediately supersedes queued neighbors.
-    pub fn demand(&self, requests: Vec<(Key, u8)>) {
+    pub fn demand(&self, mut requests: Vec<(Key, u8)>) {
+        // Select by urgency before bounding/deduplicating the queue. Background
+        // burst analysis must not crowd out visible quick previews.
+        requests
+            .sort_by_key(|(key, priority)| (*priority, key.edge.unwrap_or(u32::MAX), key.analyze));
         let mut queue = self.queue.0.lock().unwrap();
         let mut seen = HashSet::new();
         queue.jobs = requests
@@ -270,9 +302,13 @@ impl ImageCache {
                 generation: self.generation,
             })
             .collect();
-        queue
-            .jobs
-            .sort_by_key(|job| std::cmp::Reverse(job.priority));
+        queue.jobs.sort_by_key(|job| {
+            std::cmp::Reverse((
+                job.priority,
+                job.key.edge.unwrap_or(u32::MAX),
+                job.key.analyze,
+            ))
+        });
         self.queue.1.notify_all();
     }
 }
@@ -389,6 +425,74 @@ mod tests {
             decode_time: Duration::ZERO,
             feature: crate::bursts::Feature::default(),
         })
+    }
+    #[test]
+    fn previews_reuse_this_photo_across_sizes_and_keep_large_buffers_out_of_the_reel() {
+        let mut cache = ImageCache::new(64 * 1024 * 1024);
+        let requested = Key::fit("photo.jpg".into(), 384);
+        for key in [
+            Key::fit("other.jpg".into(), 384),
+            Key::fit("photo.jpg".into(), 128),
+            Key::fit("photo.jpg".into(), 256),
+            Key::native("photo.jpg".into()),
+        ] {
+            cache.entries.insert(
+                key,
+                Entry {
+                    picture: small_picture(),
+                    tick: 0,
+                },
+            );
+        }
+        assert_eq!(cache.preview(&requested, true).unwrap().0.edge, Some(256));
+        assert_eq!(cache.preview(&requested, false).unwrap().0.edge, None);
+        cache.entries.insert(
+            requested.clone(),
+            Entry {
+                picture: small_picture(),
+                tick: 0,
+            },
+        );
+        assert_eq!(cache.preview(&requested, true).unwrap().0, requested);
+        assert!(
+            cache
+                .preview(&Key::fit("missing.jpg".into(), 128), false)
+                .is_none()
+        );
+    }
+    #[test]
+    fn cold_demands_prioritize_active_quick_previews_before_native_or_neighbor_decodes() {
+        let cache = ImageCache::new(64 * 1024 * 1024);
+        cache.queue.0.lock().unwrap().stop = true;
+        let quick = Key::fit("active.jpg".into(), QUICK_PREVIEW_EDGE);
+        cache.demand(vec![
+            (Key::native("active.jpg".into()), 0),
+            (Key::fit("active.jpg".into(), 2048), 0),
+            (quick.clone(), 0),
+            (Key::fit("neighbor.jpg".into(), 128), 1),
+        ]);
+        let mut queue = cache.queue.0.lock().unwrap();
+        assert_eq!(queue.jobs.pop().unwrap().key, quick);
+        assert_eq!(queue.jobs.pop().unwrap().key.edge, Some(2048));
+        assert_eq!(queue.jobs.pop().unwrap().key.edge, None);
+        assert_eq!(queue.jobs.pop().unwrap().priority, 1);
+    }
+    #[test]
+    fn background_requests_cannot_crowd_visible_previews_out_of_the_bounded_queue() {
+        let cache = ImageCache::new(64 * 1024 * 1024);
+        cache.queue.0.lock().unwrap().stop = true;
+        let visible = Key::fit("visible.jpg".into(), 128);
+        let mut requests = (0..500)
+            .map(|i| (Key::fit(format!("background-{i}.jpg").into(), 512), 4))
+            .collect::<Vec<_>>();
+        requests.push((visible.clone(), 4));
+        requests.push((visible.clone(), 3));
+        cache.demand(requests);
+        let mut queue = cache.queue.0.lock().unwrap();
+        assert_eq!(queue.jobs.len(), 128);
+        let first = queue.jobs.pop().unwrap();
+        assert_eq!(first.key, visible);
+        assert_eq!(first.priority, 3);
     }
     #[test]
     fn tiers_evict_independently_and_active_buffers_survive() {

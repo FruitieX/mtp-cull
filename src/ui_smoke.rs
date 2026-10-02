@@ -130,6 +130,121 @@ pub(super) struct Smoke {
     resize_probe: Option<ResizeProbe>,
 }
 impl Smoke {
+    pub fn quick_previews_only(&self) -> bool {
+        std::env::var_os("MTP_CULL_SMOKE_PREVIEWS").is_some() && (self.step <= 2 || self.step == 4)
+    }
+    fn tick_previews(&mut self, app: &mut App, ctx: &egui::Context) -> Result<()> {
+        match self.step {
+            0 => {
+                if app.session.as_ref().is_none_or(|s| s.shots.len() < 3) {
+                    bail!("preview smoke needs three JPEG fixtures");
+                }
+                app.cache.clear();
+                app.canvas.reset();
+                app.thumbnails.clear();
+                app.thumbnail_ticks.clear();
+                app.settings.group_bursts = false;
+                app.settings.reel_grid = true;
+                app.settings.reel_thumbnail_size = 100.0;
+                app.settings.reel_width = 260.0;
+                app.set_reel_position(Position::Left);
+                app.selected = 1;
+                app.reel_selection.single(1);
+                app.pinned = Some(0);
+                app.canvas.mode = Mode::SideBySide;
+                app.canvas.viewport.zoom = Some(1.0);
+                self.step = 1;
+            }
+            1 | 2 => {
+                if app.canvas.previews.len() != 2
+                    || app
+                        .canvas
+                        .previews
+                        .iter()
+                        .any(|(_, key)| key.edge != Some(crate::image_cache::QUICK_PREVIEW_EDGE))
+                {
+                    bail!(
+                        "both comparison panes must draw quick pixels while sharp decodes are held"
+                    );
+                }
+                for (b, key) in &app.canvas.previews {
+                    let index = if *b { 1 } else { 0 };
+                    if app.session.as_ref().unwrap().shots[index].preview()
+                        != Some(key.path.as_path())
+                    {
+                        bail!("comparison preview belongs to the wrong photo");
+                    }
+                }
+                if self.step == 1 {
+                    self.capture(ctx, "comparison-quick-preview");
+                    app.canvas.mode = Mode::Wipe;
+                    self.step = 2;
+                } else {
+                    self.capture(ctx, "wipe-quick-preview");
+                    self.step = 3;
+                }
+            }
+            3 => {
+                if app.canvas.previews.len() != 2
+                    || app
+                        .canvas
+                        .previews
+                        .iter()
+                        .any(|(_, key)| key.edge.is_some())
+                {
+                    bail!("comparison did not upgrade to native pixels");
+                }
+                self.capture(ctx, "wipe-sharp-preview");
+                app.settings.reel_thumbnail_size = 390.0;
+                app.cache.clear();
+                self.step = 4;
+            }
+            4 => {
+                if app.reel_previews.is_empty()
+                    || app
+                        .reel_previews
+                        .iter()
+                        .any(|(_, key)| key.edge != Some(crate::image_cache::QUICK_PREVIEW_EDGE))
+                {
+                    bail!("resizing must keep drawing the old small reel textures");
+                }
+                if app.canvas.previews.len() != 2
+                    || app
+                        .canvas
+                        .previews
+                        .iter()
+                        .any(|(_, key)| key.edge.is_some())
+                {
+                    bail!("CPU eviction must retain resident native pixels");
+                }
+                self.capture(ctx, "reel-cached-size-preview");
+                self.step = 5;
+            }
+            5 => {
+                if app.reel_previews.is_empty()
+                    || app.reel_previews.iter().any(|(_, key)| {
+                        key.edge
+                            .is_none_or(|edge| edge <= crate::image_cache::QUICK_PREVIEW_EDGE)
+                    })
+                {
+                    bail!("reel textures did not upgrade after resize");
+                }
+                self.capture(ctx, "reel-sharp-size-preview");
+                self.step = 6;
+            }
+            6 => {
+                std::fs::write(
+                    self.root.join("PASS.txt"),
+                    "PASS: quick previews in both comparison and wipe panes; upgrade to native pixels; correct photo identity; resident native pixels after CPU eviction; previous reel size during resize, followed by sharper thumbnails.\n",
+                )?;
+                self.step = 255;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            _ => bail!("invalid preview smoke step"),
+        }
+        self.frames = 0;
+        Ok(())
+    }
     pub fn input_ready(&self) -> bool {
         self.waiting.is_none()
     }
@@ -888,6 +1003,9 @@ impl Smoke {
             return Ok(());
         }
         self.waiting = None;
+        if std::env::var_os("MTP_CULL_SMOKE_PREVIEWS").is_some() && self.step == 4 {
+            return self.tick_previews(app, ctx);
+        }
         if let Some(mut probe) = self.resize_probe.take() {
             ctx.request_repaint_after(Duration::from_millis(5));
             if probe.tick(app, &mut self.input, &self.root)? {
@@ -906,6 +1024,9 @@ impl Smoke {
         ctx.request_repaint_after(Duration::from_millis(5));
         if app.loader.is_some() || app.cache.pending() || self.frames < 4 {
             return Ok(());
+        }
+        if std::env::var_os("MTP_CULL_SMOKE_PREVIEWS").is_some() {
+            return self.tick_previews(app, ctx);
         }
         // Allow popup animation to finish before judging editor layout.
         if (matches!(self.step, 25 | 31)

@@ -189,6 +189,11 @@ pub fn icon_button(ui: &mut egui::Ui, label: &str, glyph: Icon) -> egui::Respons
     button_icon(ui, &response, glyph, TEXT);
     response
 }
+pub fn compact_icon_button(ui: &mut egui::Ui, glyph: Icon, selected: bool) -> egui::Response {
+    let response = ui.add(egui::Button::selectable(selected, "").min_size(egui::vec2(28.0, 28.0)));
+    icon(ui.painter(), response.rect.center(), glyph, TEXT);
+    response
+}
 pub fn command_icon(command: crate::review_commands::Command) -> Option<Icon> {
     use crate::review_commands::Command;
     Some(match command {

@@ -177,3 +177,8 @@ the full viewer/focus/import/retry/resume smoke also passes. See
 - [x] Increase the preferred thumbnail width limit from 300 to 390 px (30%).
 - [x] Add continuous native drag checks for Bottom/Left/Right in strip and grid mode, including column changes and returning to the original size.
 - [x] Fit bottom-grid columns across the full viewport width using the same preferred-size snapping as side grids.
+- [x] Prioritize quick previews, reuse cached image sizes in the reel/viewer, and retain pixels while native uploads wait.
+- [x] Keep visible preview requests ahead of background burst analysis when bounding the decode queue.
+- [x] Reduce sidebar controls to two rows; label the position menu explicitly and move counts to the footer.
+- [x] Remove persistent saved-status text, move diagnostics into Performance settings, and show preview retry only after failures.
+- [x] Exercise progressive comparison/wipe previews, native upgrades, CPU eviction and thumbnail resizing in the native renderer.

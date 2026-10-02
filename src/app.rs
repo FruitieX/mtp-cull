@@ -96,6 +96,8 @@ struct App {
     #[cfg(feature = "ui-smoke")]
     reel_cells: Vec<(usize, egui::Rect)>,
     #[cfg(feature = "ui-smoke")]
+    reel_previews: Vec<(usize, Key)>,
+    #[cfg(feature = "ui-smoke")]
     reel_menu_items: Vec<(Command, egui::Rect)>,
     #[cfg(feature = "ui-smoke")]
     reel_panel_bounds: egui::Rect,
@@ -119,6 +121,7 @@ struct App {
     device: Option<String>,
     folder: Option<String>,
     mtp_pending: HashSet<String>,
+    preview_failures: HashSet<String>,
     staging_request: Option<(Vec<String>, bool, u64)>,
     staging_paused: bool,
     staging_active: bool,
@@ -182,6 +185,8 @@ impl App {
             #[cfg(feature = "ui-smoke")]
             reel_cells: Vec::new(),
             #[cfg(feature = "ui-smoke")]
+            reel_previews: Vec::new(),
+            #[cfg(feature = "ui-smoke")]
             reel_menu_items: Vec::new(),
             #[cfg(feature = "ui-smoke")]
             reel_panel_bounds: egui::Rect::NOTHING,
@@ -205,6 +210,7 @@ impl App {
             device: None,
             folder: None,
             mtp_pending: HashSet::new(),
+            preview_failures: HashSet::new(),
             staging_request: None,
             staging_paused: false,
             staging_active: false,
@@ -339,6 +345,7 @@ impl App {
         self.features.clear();
         self.burst_groups.clear();
         self.mtp_pending.clear();
+        self.preview_failures.clear();
         self.staging_request = None;
         self.staging_paused = false;
         self.refresh_visible();
@@ -799,6 +806,8 @@ impl App {
             Command::Retry => {
                 self.cache.retry();
                 self.mtp_pending.clear();
+                self.preview_failures.clear();
+                self.error = None;
                 self.send(MtpRequest::Retry);
                 self.staging_paused = false;
                 self.staging_request = None;
@@ -1183,6 +1192,7 @@ impl App {
                     preview_path,
                 } => {
                     self.mtp_pending.remove(&shot_id);
+                    self.preview_failures.remove(&shot_id);
                     if let Some(session) = &mut self.session
                         && let Some(shot) = session.shots.iter_mut().find(|s| s.id == shot_id)
                     {
@@ -1193,6 +1203,7 @@ impl App {
                 }
                 MtpEvent::PreviewFailed { shot_id, message } => {
                     self.mtp_pending.remove(&shot_id);
+                    self.preview_failures.insert(shot_id);
                     self.error = Some(message);
                 }
                 MtpEvent::ImportFinished {
@@ -1386,6 +1397,10 @@ impl App {
                 if let Some(path) = shot.preview() {
                     self.demands
                         .push((Key::fit(path.to_owned(), edge), priority));
+                    self.demands.push((
+                        Key::fit(path.to_owned(), crate::image_cache::QUICK_PREVIEW_EDGE),
+                        priority,
+                    ));
                     // Native buffers are large. Keep neighbors inside the configured tier.
                     let native_slots =
                         (self.settings.cpu_cache_mib * 1024 * 1024 * 3 / 4 / (160 * 1024 * 1024))
@@ -1675,15 +1690,39 @@ impl App {
     }
     fn filters(&mut self, ui: &mut egui::Ui, position: Position) {
         if position.is_side() {
-            ui.horizontal(|ui| self.media_filters(ui));
-            ui.horizontal_wrapped(|ui| {
-                self.decision_filter_control(ui);
-                self.reel_layout_controls(ui, position);
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(5.0, 5.0);
+                ui.spacing_mut().button_padding = egui::vec2(7.0, 5.0);
+                ui.horizontal(|ui| {
+                    let before = self.media_filter;
+                    egui::ComboBox::from_id_salt("reel-media")
+                        .width(65.0)
+                        .selected_text(self.media_filter.map_or("All media", Kind::label))
+                        .show_ui(ui, |ui| {
+                            for (kind, label) in [
+                                (Some(Kind::Jpeg), "JPEG"),
+                                (Some(Kind::Raw), "RAW"),
+                                (Some(Kind::Video), "Video"),
+                                (None, "All media"),
+                            ] {
+                                ui.selectable_value(&mut self.media_filter, kind, label);
+                            }
+                        })
+                        .response
+                        .on_hover_text("Media filter");
+                    if before != self.media_filter {
+                        self.refresh_visible();
+                    }
+                    self.decision_filter_control(ui);
+                    self.reel_mode_control(ui, true);
+                });
+                ui.horizontal(|ui| {
+                    self.reel_position_control(ui);
+                    if self.settings.reel_grid {
+                        self.reel_thumbnail_control(ui);
+                    }
+                });
             });
-            ui.horizontal_wrapped(|ui| self.reel_counts(ui));
-            if self.settings.reel_grid {
-                ui.horizontal(|ui| self.reel_thumbnail_control(ui));
-            }
         } else {
             ui.horizontal(|ui| {
                 self.media_filters(ui);
@@ -1693,7 +1732,6 @@ impl App {
                     if self.settings.reel_grid {
                         self.reel_thumbnail_control(ui);
                     }
-                    self.reel_counts(ui);
                 });
             });
         }
@@ -1722,7 +1760,11 @@ impl App {
                 Some(Decision::Reject) => "Rejected",
                 Some(Decision::Unreviewed) => "Unreviewed",
             })
-            .width(125.0)
+            .width(if self.settings.reel_position.is_side() {
+                115.0
+            } else {
+                125.0
+            })
             .show_ui(ui, |ui| {
                 for (filter, label) in [
                     (None, "All decisions"),
@@ -1738,30 +1780,44 @@ impl App {
         }
     }
     fn reel_layout_controls(&mut self, ui: &mut egui::Ui, position: Position) {
-        if theme::icon_button(
-            ui,
-            if !self.settings.reel_grid {
-                "Grid"
-            } else if position.is_side() {
-                "Strip"
-            } else {
-                "Row"
-            },
-            if self.settings.reel_grid {
-                theme::Icon::Row
-            } else {
-                theme::Icon::Grid
-            },
-        )
-        .on_hover_text(
-            self.button_text("Switch between a single strip and grid", Command::ReelMode),
-        )
-        .clicked()
+        self.reel_mode_control(ui, position.is_side());
+        self.reel_position_control(ui);
+    }
+    fn reel_mode_control(&mut self, ui: &mut egui::Ui, compact: bool) {
+        let glyph = if self.settings.reel_grid {
+            theme::Icon::Grid
+        } else {
+            theme::Icon::Row
+        };
+        let response = if compact {
+            theme::compact_icon_button(ui, glyph, self.settings.reel_grid)
+        } else {
+            theme::icon_button(
+                ui,
+                if self.settings.reel_grid {
+                    "Strip"
+                } else {
+                    "Grid"
+                },
+                if self.settings.reel_grid {
+                    theme::Icon::Row
+                } else {
+                    theme::Icon::Grid
+                },
+            )
+        };
+        if response
+            .on_hover_text(
+                self.button_text("Switch between a single strip and grid", Command::ReelMode),
+            )
+            .clicked()
         {
             self.command(Command::ReelMode);
         }
-        ui.menu_button("Reel", |ui| {
-            ui.label("Position");
+    }
+    fn reel_position_control(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Position", |ui| {
+            ui.label("Reel position");
             for next in Position::ALL {
                 if ui
                     .selectable_label(self.settings.reel_position == next, next.label())
@@ -1773,11 +1829,14 @@ impl App {
             }
         })
         .response
-        .on_hover_text(self.button_text("Move reel", Command::ReelPosition));
+        .on_hover_text(self.button_text(
+            &format!("Reel position: {}", self.settings.reel_position.label()),
+            Command::ReelPosition,
+        ));
     }
     fn reel_thumbnail_control(&mut self, ui: &mut egui::Ui) {
         ui.scope(|ui| {
-            ui.spacing_mut().slider_width = (ui.available_width() - 45.0).clamp(100.0, 150.0);
+            ui.spacing_mut().slider_width = (ui.available_width() - 45.0).clamp(55.0, 150.0);
             let response = ui
                 .add(
                     egui::Slider::new(
@@ -1880,83 +1939,7 @@ impl App {
             });
         }
         ui.horizontal(|ui| {
-            let source = self.session.as_ref().map(|session| match &session.source {
-                Source::Local { root, raw } => (
-                    root.file_name()
-                        .unwrap_or(root.as_os_str())
-                        .to_string_lossy()
-                        .into_owned(),
-                    format!(
-                        "{}{}",
-                        root.display(),
-                        raw.as_ref()
-                            .map(|p| format!(" · RAW {}", p.display()))
-                            .unwrap_or_default()
-                    ),
-                ),
-                Source::Mtp { device, folder } => {
-                    let name = self
-                        .devices
-                        .iter()
-                        .find(|d| d.id == *device)
-                        .map_or("Camera", |d| d.name.as_str());
-                    let path = self
-                        .folders
-                        .iter()
-                        .find(|f| f.id == *folder)
-                        .map_or("Selected folder", |f| f.path.as_str());
-                    (name.into(), format!("{name} · {path}"))
-                }
-            });
-            if self.loader.is_some() {
-                ui.spinner();
-                ui.weak("Opening photos…");
-            } else if let Some((name, detail)) = source {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(name).small().color(theme::MUTED))
-                        .truncate(),
-                )
-                .on_hover_text(detail);
-                if !self.staging_text.is_empty() {
-                    ui.add_space(10.0);
-                    ui.label(egui::RichText::new(&self.staging_text).small().color(
-                        if self.staging_active {
-                            theme::ACCENT
-                        } else {
-                            theme::MUTED
-                        },
-                    ));
-                }
-            } else {
-                ui.weak("Ready to review");
-            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button("Performance", |ui| {
-                    ui.set_min_width(230.0);
-                    ui.strong("Preview cache");
-                    ui.label(format!(
-                        "CPU {:.0} MiB · GPU {:.0} MiB",
-                        self.cache.bytes() as f64 / 1048576.0,
-                        self.canvas.bytes() as f64 / 1048576.0
-                    ));
-                    ui.label(format!(
-                        "UI {:.2} ms · mean decode {:.1} ms",
-                        self.frame_ms,
-                        self.cache.stats.decode_ms / self.cache.stats.decodes.max(1) as f64
-                    ));
-                });
-                let notice = self
-                    .message
-                    .as_deref()
-                    .unwrap_or("Changes save automatically. Use the shortcuts to review faster.");
-                if self.session.is_some() {
-                    ui.label(
-                        egui::RichText::new("Decisions saved")
-                            .small()
-                            .color(theme::MUTED),
-                    )
-                    .on_hover_text(notice);
-                }
                 if self.staging_active || self.staging_paused {
                     self.command_button(
                         ui,
@@ -1968,9 +1951,66 @@ impl App {
                         Command::Pause,
                     );
                 }
-                if self.worker.is_some() && !self.camera_busy {
-                    self.command_button(ui, "Retry", Command::Retry);
+                if !self.camera_busy
+                    && (self.cache.has_failures() || !self.preview_failures.is_empty())
+                {
+                    self.command_button(ui, "Retry previews", Command::Retry);
                 }
+                if self.session.is_some() {
+                    self.reel_counts(ui);
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    let source = self.session.as_ref().map(|session| match &session.source {
+                        Source::Local { root, raw } => (
+                            root.file_name()
+                                .unwrap_or(root.as_os_str())
+                                .to_string_lossy()
+                                .into_owned(),
+                            format!(
+                                "{}{}",
+                                root.display(),
+                                raw.as_ref()
+                                    .map(|p| format!(" · RAW {}", p.display()))
+                                    .unwrap_or_default()
+                            ),
+                        ),
+                        Source::Mtp { device, folder } => {
+                            let name = self
+                                .devices
+                                .iter()
+                                .find(|d| d.id == *device)
+                                .map_or("Camera", |d| d.name.as_str());
+                            let path = self
+                                .folders
+                                .iter()
+                                .find(|f| f.id == *folder)
+                                .map_or("Selected folder", |f| f.path.as_str());
+                            (name.into(), format!("{name} · {path}"))
+                        }
+                    });
+                    if self.loader.is_some() {
+                        ui.spinner();
+                        ui.weak("Opening photos…");
+                    } else if let Some((name, detail)) = source {
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(name).small().color(theme::MUTED))
+                                .truncate(),
+                        )
+                        .on_hover_text(detail);
+                        if !self.staging_text.is_empty() {
+                            ui.add_space(10.0);
+                            ui.label(egui::RichText::new(&self.staging_text).small().color(
+                                if self.staging_active {
+                                    theme::ACCENT
+                                } else {
+                                    theme::MUTED
+                                },
+                            ));
+                        }
+                    } else {
+                        ui.weak("Ready to review");
+                    }
+                });
             });
         });
     }
@@ -2055,6 +2095,11 @@ impl App {
                                             }
                                         });
                                     ui.label(egui::RichText::new("Smooth uses mipmaps to reduce moiré when zoomed out (about 33% extra image texture memory). Linear blends neighboring pixels using less memory, but can show moiré when zoomed out. Nearest neighbor shows pixels without interpolation.").small().color(theme::MUTED));
+                                    ui.separator();
+                                    ui.collapsing("Live diagnostics", |ui| {
+                                        ui.label(format!("CPU cache {:.0} MiB · GPU cache {:.0} MiB", self.cache.bytes() as f64 / 1048576.0, self.canvas.bytes() as f64 / 1048576.0));
+                                        ui.label(format!("UI {:.2} ms · mean decode {:.1} ms", self.frame_ms, self.cache.stats.decode_ms / self.cache.stats.decodes.max(1) as f64));
+                                    });
                                 }
                                 _ => {
                                     ui.label(egui::RichText::new("Edit a binding, then save. Conflicts are highlighted below.").small().color(theme::MUTED));
@@ -2667,7 +2712,21 @@ impl eframe::App for App {
                 });
             self.canvas.prefetch(&ctx, &mut self.cache, keys);
         }
-        self.cache.demand(std::mem::take(&mut self.demands));
+        let demands = std::mem::take(&mut self.demands);
+        #[cfg(feature = "ui-smoke")]
+        let demands = if self
+            .smoke
+            .as_ref()
+            .is_some_and(smoke::Smoke::quick_previews_only)
+        {
+            demands
+                .into_iter()
+                .filter(|(key, _)| key.edge == Some(crate::image_cache::QUICK_PREVIEW_EDGE))
+                .collect()
+        } else {
+            demands
+        };
+        self.cache.demand(demands);
         if self.cache.pending()
             || self.loader.is_some()
             || self.import.is_some()
