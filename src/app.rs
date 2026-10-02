@@ -1788,7 +1788,7 @@ impl App {
                     .text("Size"),
                 )
                 .on_hover_text(format!(
-                    "Preferred thumbnail width. Side grids fill the reel width.\n{}\n{}",
+                    "Preferred thumbnail width. Grids fill the reel width.\n{}\n{}",
                     self.button_text("Smaller", Command::ReelSmaller),
                     self.button_text("Larger", Command::ReelLarger)
                 ));
@@ -2030,7 +2030,7 @@ impl App {
                                     });
                                     ui.checkbox(&mut self.draft_settings.reel_grid, "Show a grid instead of a single strip");
                                     ui.add(egui::Slider::new(&mut self.draft_settings.reel_thumbnail_size, crate::reel::MIN_THUMBNAIL_WIDTH..=crate::reel::MAX_THUMBNAIL_WIDTH).text("Preferred thumbnail width"));
-                                    ui.label(egui::RichText::new("Side grids fill the reel width while keeping thumbnails near this size. Adjust Size above the reel to change it while reviewing.").small().color(theme::MUTED));
+                                    ui.label(egui::RichText::new("Grids fill the reel width while keeping thumbnails near this size. Adjust Size above the reel to change it while reviewing.").small().color(theme::MUTED));
                                     ui.add(egui::Slider::new(&mut self.draft_settings.reel_scroll_speed, 0.25..=8.0).text("Reel scroll speed"));
                                     ui.label(egui::RichText::new("Drag the edge beside the viewer to resize. The single strip scrolls horizontally at the bottom and vertically at either side. Ctrl-click selects a batch; Shift-click selects a range.").small().color(theme::MUTED));
                                     if let Some(session) = &self.session {

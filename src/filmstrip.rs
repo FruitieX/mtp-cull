@@ -44,21 +44,17 @@ impl App {
             .wheel_scroll_multiplier(egui::Vec2::splat(self.settings.reel_scroll_speed.clamp(0.25, 8.0)))
             .show_viewport(ui, |ui, viewport| {
                 // Compute against the actual scrolling viewport, after any scrollbar
-                // space has been reserved, so complete side-grid rows fill its width.
+                // space has been reserved, so complete grid rows fill its width.
                 let width = ui.available_width();
-                let layout = if grid && side {
+                let layout = if grid {
                     crate::reel::Layout::fitted_grid(width, self.settings.reel_thumbnail_size, self.visible.len())
                 } else {
-                    let card_width = if grid {
-                        self.settings.reel_thumbnail_size.clamp(crate::reel::MIN_THUMBNAIL_WIDTH, crate::reel::MAX_THUMBNAIL_WIDTH)
-                    } else if side {
+                    let card_width = if side {
                         (width - 8.0).clamp(100.0, 1024.0)
                     } else {
                         ((height - 40.0) * 1.5).clamp(100.0, 540.0)
                     };
-                    let columns = if grid {
-                        (width / (card_width + 8.0)).floor().max(1.0) as usize
-                    } else if side { 1 } else { self.visible.len().max(1) };
+                    let columns = if side { 1 } else { self.visible.len().max(1) };
                     crate::reel::Layout {
                         columns, count: self.visible.len(),
                         cell: egui::vec2(card_width + 8.0, if vertical { card_width / 1.5 + 48.0 } else { height - 10.0 }),

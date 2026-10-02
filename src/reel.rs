@@ -297,7 +297,7 @@ mod tests {
         assert_eq!(grid.follow_offset(offset, size, 0, true).y, 101.0);
     }
     #[test]
-    fn fitted_side_grids_fill_the_viewport_and_keep_the_nearest_thumbnail_size() {
+    fn fitted_grids_fill_the_viewport_and_keep_the_nearest_thumbnail_size() {
         let grid = Layout::fitted_grid(352.0, 160.0, 500);
         assert_eq!(grid.columns, 2);
         assert_eq!(grid.rect(0).width(), 172.0);
@@ -312,7 +312,7 @@ mod tests {
             Layout::fitted_grid(480.0, MAX_THUMBNAIL_WIDTH, 500).columns,
             1
         );
-        for width in [232.0, 272.0, 352.0, 520.0, 1000.0] {
+        for width in [232.0, 272.0, 352.0, 520.0, 1000.0, 1440.0, 2560.0] {
             for target in [100.0, 160.0, 220.0, 300.0, 390.0] {
                 let grid = Layout::fitted_grid(width, target, 500);
                 assert!((grid.rect(grid.columns - 1).right() - width).abs() < 0.001);

@@ -96,9 +96,10 @@ or vertically in a grid; Shift is optional. Up/Down moves between grid rows in
 the same column (the last photo is used in an incomplete row); Left/Right moves
 one photo. Up/Down moves one photo in a single strip. Navigation stops at the
 first/last row, and the reel follows the active photo.
-Side grids spread their columns across the full reel width, choosing the column
-count that keeps thumbnails closest to your preferred size. Use the **Size**
-slider above the grid to adjust that preference; **Ctrl+Alt+Minus/Equals** makes
+Grids at all reel positions spread their columns across the full reel width,
+choosing the column count that keeps thumbnails closest to your preferred size.
+Use the **Size** slider above the grid to adjust that preference;
+**Ctrl+Alt+Minus/Equals** makes
 them smaller/larger. Resizing the sidebar reflows the grid and keeps the active
 photo at the same relative viewport position while dragging. Both strip and grid
 layouts preserve this position during resizing, without moving the photo to

@@ -276,3 +276,9 @@ Resizing no longer requests keyboard follow, which previously aligned the active
 photo with opposite scroll edges depending on drag direction. The preferred
 thumbnail width now ranges from 100 to 390 pixels. Rendering remains virtualized;
 thumbnail decode buckets, upload caps and cache budgets are unchanged.
+
+Bottom grids now use the same fitted columns as side grids. The six reel tests
+and strict Clippy pass; closest-size/full-width coverage includes 1440- and
+2560-point widths. Native 500-shot runs at 2560x1440 and 1024x768 verify that the
+bottom grid's complete rows reach the viewport edge, then pass keyboard row
+navigation and the continuous resize checks for all placements.

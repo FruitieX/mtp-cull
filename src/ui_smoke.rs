@@ -216,11 +216,11 @@ impl Smoke {
                 .reel_cells
                 .iter()
                 .find(|(i, _)| (i + 1) % columns == 0)
-                .ok_or_else(|| eyre!("side grid has no complete visible row"))?
+                .ok_or_else(|| eyre!("grid has no complete visible row"))?
                 .1;
             if (last.right() - app.reel_clip.right()).abs() > 1.0 {
                 bail!(
-                    "side grid did not fill the viewport: {} vs {}",
+                    "grid did not fill the viewport: {} vs {}",
                     last.right(),
                     app.reel_clip.right()
                 );
@@ -230,7 +230,7 @@ impl Smoke {
                 .iter()
                 .any(|(i, r)| *i == app.selected && app.reel_clip.contains(r.center()))
             {
-                bail!("side grid did not follow the active photo after reflow");
+                bail!("grid did not follow the active photo after reflow");
             }
             Ok(())
         }
@@ -413,6 +413,7 @@ impl Smoke {
                 {
                     bail!("grid did not follow navigation");
                 }
+                check_fitted_grid(app)?;
                 self.capture(ctx, "reel-grid-follow");
                 self.key(egui::Key::ArrowDown, egui::Modifiers::NONE);
                 self.step = 40;

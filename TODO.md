@@ -176,3 +176,4 @@ the full viewer/focus/import/retry/resume smoke also passes. See
 - [x] Resolve scroll offsets before painting to eliminate frames combining new thumbnail geometry with the old scroll position.
 - [x] Increase the preferred thumbnail width limit from 300 to 390 px (30%).
 - [x] Add continuous native drag checks for Bottom/Left/Right in strip and grid mode, including column changes and returning to the original size.
+- [x] Fit bottom-grid columns across the full viewport width using the same preferred-size snapping as side grids.
