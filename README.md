@@ -67,8 +67,10 @@ The MTP CLI commands support Windows and Linux through the same device worker.
 4. Open **Focus** and enable **Sharpness overlay** for native-resolution green peaking. Draw or create a shared
    comparison region to see both region scores. Adjust threshold and opacity.
    These are inspection aids; noise, texture and JPEG processing affect scores.
-5. Open **Import selected**, choose JPEG/RAW/video destinations, date and album,
-   and copy. Videos default to selected and included. Unreviewed JPEGs are excluded.
+5. Open **Import**, choose JPEG/RAW/video destinations, date and album,
+   and copy. It copies every shot marked Keep in the session; the filmstrip
+   selection, the current image and the active filters do not narrow it.
+   Videos default to selected and included. Unreviewed JPEGs are excluded.
    Each media type uses its own destination root: `root/year/date album/name`.
    **Destination preset** fills the roots and album from a saved import preset,
    preserving the session date and all review decisions. **Save as preset** opens

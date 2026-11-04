@@ -89,7 +89,7 @@ impl App {
             .max_height((ctx.content_rect().height() - 90.0).max(300.0))
             .show(ctx, |ui| {
                 ui.label("Copy all supported photos, RAW files and videos without culling.");
-                ui.weak("During review, choose a preset in Import selected to reuse its destinations and album. Device and source settings only affect imports without reviewing.");
+                ui.weak("During review, choose a preset in Import to reuse its destinations and album. Device and source settings only affect imports without reviewing.");
                 ui.label(
                     egui::RichText::new("Files go to destination / year / date album / filename.")
                         .small()

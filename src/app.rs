@@ -1542,7 +1542,7 @@ impl App {
                     .add_enabled(
                         self.session.is_some() && !self.camera_busy && self.import.is_none(),
                         egui::Button::new(
-                            egui::RichText::new("Import selected")
+                            egui::RichText::new("Import")
                                 .color(theme::BACKGROUND)
                                 .strong(),
                         )
@@ -1550,7 +1550,7 @@ impl App {
                         .stroke(egui::Stroke::NONE),
                     )
                     .on_hover_text(self.button_text(
-                        "Copy selected originals to your destinations",
+                        "Copy kept originals to your destinations",
                         Command::Import,
                     ))
                     .clicked()
@@ -2310,7 +2310,7 @@ impl App {
             return;
         }
         let mut open = true;
-        let _shown = egui::Window::new("Import selected originals")
+        let _shown = egui::Window::new("Import originals")
             .open(&mut open)
             .default_width(650.0)
             .default_pos(ctx.content_rect().center() - egui::vec2(325.0, 230.0))
@@ -2392,7 +2392,7 @@ impl App {
                 if ui
                     .add_enabled(
                         !selected.is_empty() && self.import.is_none() && !self.camera_busy && self.loader.is_none(),
-                        egui::Button::new("Copy selected files"),
+                        egui::Button::new("Copy kept files"),
                     )
                     .clicked()
                 {
