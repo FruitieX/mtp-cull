@@ -25,7 +25,7 @@
           };
           nativeBuildInputs = [ pkgs.pkg-config pkgs.cmake pkgs.nasm ];
           buildInputs = [
-            pkgs.libudev
+            pkgs.udev
             pkgs.libxkbcommon
             pkgs.wayland
             pkgs.libGL
@@ -60,7 +60,7 @@
               pkgs.cmake
               pkgs.nasm
               pkgs.pkg-config
-              pkgs.libudev
+              pkgs.udev
               pkgs.libxkbcommon
               pkgs.wayland
               pkgs.libGL
