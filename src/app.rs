@@ -679,10 +679,10 @@ impl App {
                 );
             }
             Command::Zoom => {
-                self.canvas.viewport.zoom = if self.canvas.viewport.zoom.is_some() {
-                    None
+                if self.canvas.viewport.zoom.is_some() {
+                    self.canvas.viewport.fit();
                 } else {
-                    Some(1.0)
+                    self.canvas.viewport.zoom = Some(1.0);
                 }
             }
             Command::Pin => {
@@ -1549,10 +1549,12 @@ impl App {
                         .fill(theme::ACCENT)
                         .stroke(egui::Stroke::NONE),
                     )
-                    .on_hover_text(self.button_text(
-                        "Copy kept originals to your destinations",
-                        Command::Import,
-                    ))
+                    .on_hover_text(
+                        self.button_text(
+                            "Copy kept originals to your destinations",
+                            Command::Import,
+                        ),
+                    )
                     .clicked()
                 {
                     self.command(Command::Import);

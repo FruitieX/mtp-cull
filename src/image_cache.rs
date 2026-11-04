@@ -58,6 +58,8 @@ pub struct Picture {
     pub focus: Option<Arc<FocusMap>>,
     pub decode_time: Duration,
     pub feature: crate::bursts::Feature,
+    /// Capture details (date, exposure, lens) for the label bar; empty if none.
+    pub details: Arc<str>,
 }
 impl Picture {
     fn bytes(&self) -> usize {
@@ -338,7 +340,7 @@ pub fn decode(key: &Key) -> Result<Picture> {
         bail!("image exceeds 100 megapixel preview limit");
     }
     let orientation = decoder.orientation()?;
-    let time = crate::bursts::capture_time(decoder.exif_metadata().ok().flatten());
+    let info = crate::photo_info::PhotoInfo::parse(decoder.exif_metadata().ok().flatten());
     #[cfg(not(feature = "turbo"))]
     let mut image = image::DynamicImage::from_decoder(decoder)?;
     #[cfg(feature = "turbo")]
@@ -393,7 +395,7 @@ pub fn decode(key: &Key) -> Result<Picture> {
         image
     };
     let feature = crate::bursts::Feature {
-        time,
+        time: info.time,
         hash: if key.edge.is_some() {
             crate::bursts::similarity(&image)
         } else {
@@ -411,6 +413,7 @@ pub fn decode(key: &Key) -> Result<Picture> {
         focus,
         decode_time: start.elapsed(),
         feature,
+        details: info.summary().into(),
     })
 }
 
@@ -424,6 +427,7 @@ mod tests {
             focus: None,
             decode_time: Duration::ZERO,
             feature: crate::bursts::Feature::default(),
+            details: Default::default(),
         })
     }
     #[test]

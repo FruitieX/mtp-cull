@@ -63,7 +63,10 @@ The MTP CLI commands support Windows and Linux through the same device worker.
    blue/orange/gray and editing selection to white. Decision labels and button
    icons also distinguish states; the preference is remembered between launches.
    Both images share zoom and pan. 100% maps a source pixel to a physical screen
-   pixel, including Windows scaling. Alt-drag B for manual alignment.
+   pixel, including Windows scaling. Zooming out stops at Fit, and panning stops
+   at the image edges, so zooming out recenters the photo. Alt-drag B for manual
+   alignment. Each pane's label shows the capture date, shutter speed, aperture,
+   ISO, focal length, exposure compensation and lens when the JPEG has EXIF data.
 4. Open **Focus** and enable **Sharpness overlay** for native-resolution green peaking. Draw or create a shared
    comparison region to see both region scores. Adjust threshold and opacity.
    These are inspection aids; noise, texture and JPEG processing affect scores.

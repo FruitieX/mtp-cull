@@ -14,6 +14,7 @@ mod mtp_file;
 mod mtp_worker;
 #[cfg(test)]
 mod performance;
+mod photo_info;
 mod quick_import;
 mod recent_sources;
 mod reel;

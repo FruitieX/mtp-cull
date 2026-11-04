@@ -8,19 +8,6 @@ pub struct Feature {
     pub time: Option<NaiveDateTime>,
     pub hash: u64,
 }
-pub fn capture_time(bytes: Option<Vec<u8>>) -> Option<NaiveDateTime> {
-    let exif = exif::Reader::new().read_raw(bytes?).ok()?;
-    let value = exif
-        .get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY)
-        .or_else(|| exif.get_field(exif::Tag::DateTime, exif::In::PRIMARY))?;
-    let exif::Value::Ascii(values) = &value.value else {
-        return None;
-    };
-    let text = std::str::from_utf8(values.first()?)
-        .ok()?
-        .trim_end_matches('\0');
-    NaiveDateTime::parse_from_str(text, "%Y:%m:%d %H:%M:%S").ok()
-}
 pub fn similarity(image: &DynamicImage) -> u64 {
     let tiny = image
         .resize_exact(9, 8, image::imageops::FilterType::Triangle)

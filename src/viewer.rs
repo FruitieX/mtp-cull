@@ -84,11 +84,40 @@ impl Viewport {
         self.center += self.alignment / source;
         self.alignment = -self.alignment;
     }
+    fn fit_scale(rect: Rect, source: Vec2) -> f32 {
+        (rect.width() / source.x).min(rect.height() / source.y)
+    }
     pub fn scale(&self, rect: Rect, source: Vec2, dpi: f32) -> f32 {
-        self.zoom.map_or_else(
-            || (rect.width() / source.x).min(rect.height() / source.y),
-            |zoom| zoom / dpi,
-        )
+        self.zoom
+            .map_or_else(|| Self::fit_scale(rect, source), |zoom| zoom / dpi)
+    }
+    /// Return to the fitted, centered view.
+    pub fn fit(&mut self) {
+        self.zoom = None;
+        self.center = egui::vec2(0.5, 0.5);
+    }
+    /// Keep the image covering the pane: an axis that is larger than the pane
+    /// can't be panned past its edges, and a smaller axis stays centered. So
+    /// zooming out gradually pulls the image back into the middle. Manual B
+    /// alignment is a deliberate offset and isn't clamped.
+    pub fn clamp(&mut self, rect: Rect, source: Vec2, dpi: f32) {
+        if self.zoom.is_none() {
+            self.center = egui::vec2(0.5, 0.5);
+            return;
+        }
+        let shown = source * self.scale(rect, source, dpi);
+        let axis = |center: f32, shown: f32, pane: f32| {
+            if shown <= pane {
+                0.5
+            } else {
+                let margin = pane / 2.0 / shown;
+                center.clamp(margin, 1.0 - margin)
+            }
+        };
+        self.center = egui::vec2(
+            axis(self.center.x, shown.x, rect.width()),
+            axis(self.center.y, shown.y, rect.height()),
+        );
     }
     pub fn image_rect(&self, rect: Rect, source: Vec2, dpi: f32, b: bool) -> Rect {
         let scale = self.scale(rect, source, dpi);
@@ -106,7 +135,13 @@ impl Viewport {
     ) {
         let before = self.image_rect(rect, source, dpi, b);
         let point = (pointer - before.min) / self.scale(rect, source, dpi);
-        let scale = (self.scale(rect, source, dpi) * dpi * factor).clamp(0.02, 16.0);
+        // Zooming out stops at the fitted size, which is the Fit view itself.
+        let fit = Self::fit_scale(rect, source) * dpi;
+        let scale = (self.scale(rect, source, dpi) * dpi * factor).min(16.0);
+        if scale <= fit * 1.0001 {
+            self.fit();
+            return;
+        }
         self.zoom = Some(scale);
         self.center = (point
             - (pointer - rect.center()) / (scale / dpi)
@@ -119,12 +154,14 @@ struct Texture {
     bytes: usize,
     tick: u64,
     source_size: [usize; 2],
+    details: Arc<str>,
 }
 
 struct Preview {
     key: Key,
     id: egui::TextureId,
     source_size: [usize; 2],
+    details: Arc<str>,
     picture: Option<Arc<Picture>>,
 }
 enum ImageTexture {
@@ -505,12 +542,13 @@ impl Canvas {
             }
         });
         if response.double_clicked() {
-            self.viewport.zoom = if self.viewport.zoom.is_some() {
-                None
+            if self.viewport.zoom.is_some() {
+                self.viewport.fit();
             } else {
-                Some(1.0)
-            };
+                self.viewport.zoom = Some(1.0);
+            }
         }
+        let mut zoomed = false;
         if response.hovered()
             && let Some(pointer) = response.hover_pos()
         {
@@ -519,6 +557,7 @@ impl Canvas {
             let factor = zoom * (scroll * 0.002).exp();
             if (factor - 1.0).abs() > 0.0001 {
                 self.viewport.zoom_at(rect, source, dpi, pointer, factor, b);
+                zoomed = true;
             }
         }
         let image_rect = self.viewport.image_rect(rect, source, dpi, b);
@@ -553,6 +592,11 @@ impl Canvas {
         }
         if response.drag_stopped() {
             self.drag_region_start = None;
+        }
+        // B is drawn in every layout except blink, so its bounds win and the
+        // shared view can't flip between panes with different limits.
+        if b || zoomed || response.dragged() {
+            self.viewport.clamp(rect, source, dpi);
         }
         let image_rect = self.viewport.image_rect(rect, source, dpi, b);
         painter.image(
@@ -598,10 +642,11 @@ impl Canvas {
         if let Some(zoom) = self.viewport.zoom {
             text.push_str(&format!(" · {:.0}%", zoom * 100.0));
         }
+        let mut notes = String::new();
         if self.native() && !native_ready {
-            text.push_str(" · Loading full-resolution image…");
+            notes.push_str(" · Loading full-resolution image…");
         } else if !native_ready {
-            text.push_str(" · Loading sharper preview…");
+            notes.push_str(" · Loading sharper preview…");
         }
         if let Some(region) = self.region {
             let region = region.translate(alignment);
@@ -616,25 +661,43 @@ impl Canvas {
                 egui::StrokeKind::Inside,
             );
             if !Rect::from_min_size(Pos2::ZERO, source).contains_rect(region) {
-                text.push_str(" · region outside image");
+                notes.push_str(" · region outside image");
             } else if native_ready
                 && let Some(focus) = preview.picture.as_ref().and_then(|p| p.focus.as_ref())
             {
-                text.push_str(&format!(" · region {:.1}", focus.score(region)));
+                notes.push_str(&format!(" · region {:.1}", focus.score(region)));
             }
         }
         let text_rect = Rect::from_min_size(clip.min, egui::vec2(clip.width(), 27.0));
         painter.rect_filled(text_rect, 0.0, Color32::from_black_alpha(190));
-        painter.text(
-            text_rect.left_center() + egui::vec2(8.0, 0.0),
-            egui::Align2::LEFT_CENTER,
+        let color = if self.active_a != b {
+            Color32::LIGHT_BLUE
+        } else {
+            Color32::WHITE
+        };
+        let font = egui::FontId::proportional(14.0);
+        let mut job = egui::text::LayoutJob::single_section(
             text,
-            egui::FontId::proportional(14.0),
-            if self.active_a != b {
-                Color32::LIGHT_BLUE
-            } else {
-                Color32::WHITE
-            },
+            egui::TextFormat::simple(font.clone(), color),
+        );
+        // Capture details sit between the fixed fields and transient notes,
+        // so they don't shift while previews load.
+        if !preview.details.is_empty() {
+            job.append(
+                &preview.details,
+                24.0,
+                egui::TextFormat::simple(font.clone(), crate::theme::MUTED),
+            );
+        }
+        job.append(&notes, 0.0, egui::TextFormat::simple(font, color));
+        let galley = painter.layout_job(job);
+        painter.galley(
+            egui::pos2(
+                text_rect.left() + 8.0,
+                text_rect.center().y - galley.size().y / 2.0,
+            ),
+            galley,
+            color,
         );
         // Outline the visible photo, so its state stays visible at any zoom.
         // Wipe panes each outline their own clipped portion in the same color
@@ -655,6 +718,7 @@ impl Canvas {
                 key: key.clone(),
                 id: texture.handle.id(),
                 source_size: texture.source_size,
+                details: texture.details.clone(),
                 picture: cache.get(key),
             });
         }
@@ -692,6 +756,7 @@ impl Canvas {
                 key: loaded,
                 id,
                 source_size: picture.source_size,
+                details: picture.details.clone(),
                 picture: Some(picture),
             });
         }
@@ -706,6 +771,7 @@ impl Canvas {
         Some(Preview {
             id: texture.handle.id(),
             source_size: texture.source_size,
+            details: texture.details.clone(),
             picture: cache.get(loaded),
             key: loaded.clone(),
         })
@@ -762,6 +828,7 @@ impl Canvas {
                 bytes: resident_bytes,
                 tick: self.tick,
                 source_size: picture.source_size,
+                details: picture.details.clone(),
             },
         );
         Some(id)
@@ -795,6 +862,7 @@ mod tests {
             focus: None,
             decode_time: std::time::Duration::ZERO,
             feature: Default::default(),
+            details: Default::default(),
         });
         let low = Key::fit("A.JPG".into(), 128);
         let mut canvas = Canvas {
@@ -829,6 +897,7 @@ mod tests {
             focus: None,
             decode_time: std::time::Duration::ZERO,
             feature: Default::default(),
+            details: Default::default(),
         });
         let a = Key::native("A.JPG".into());
         let b = Key::native("B.JPG".into());
@@ -899,6 +968,33 @@ mod tests {
         view.swap(source);
         assert!((view.image_rect(pane, source, 1.25, false).min - moved_b.min).length() < 0.01);
         assert!((view.image_rect(pane, source, 1.25, true).min - moved_a.min).length() < 0.01);
+    }
+    #[test]
+    fn zoom_out_stops_at_fit_and_panning_stays_inside_the_image() {
+        let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let source = egui::vec2(4000.0, 2000.0);
+        let mut view = Viewport {
+            zoom: Some(1.0),
+            center: egui::vec2(0.0, 1.0),
+            ..Viewport::default()
+        };
+        // Wider than the pane on both axes: edges are reachable but not passable.
+        view.clamp(rect, source, 1.0);
+        let shown = view.image_rect(rect, source, 1.0, false);
+        assert!((shown.left() - rect.left()).abs() < 0.01);
+        assert!((shown.bottom() - rect.bottom()).abs() < 0.01);
+        // Zoomed so the image is shorter than the pane: that axis centers.
+        view.zoom = Some(0.25);
+        view.clamp(rect, source, 1.0);
+        assert_eq!(view.center.y, 0.5);
+        assert!(view.image_rect(rect, source, 1.0, false).left() <= rect.left());
+        // Zooming out past the fitted size becomes the centered Fit view.
+        view.zoom_at(rect, source, 1.0, egui::pos2(10.0, 10.0), 0.1, false);
+        assert_eq!(view.zoom, None);
+        assert_eq!(view.center, egui::vec2(0.5, 0.5));
+        let fitted = view.image_rect(rect, source, 1.0, false);
+        assert!((fitted.center() - rect.center()).length() < 0.01);
+        assert!((fitted.width() - rect.width()).abs() < 0.01);
     }
     #[test]
     fn native_scale_accounts_for_dpi_and_zoom_keeps_cursor_point() {

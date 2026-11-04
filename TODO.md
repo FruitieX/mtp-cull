@@ -182,3 +182,6 @@ the full viewer/focus/import/retry/resume smoke also passes. See
 - [x] Reduce sidebar controls to two rows; label the position menu explicitly and move counts to the footer.
 - [x] Remove persistent saved-status text, move diagnostics into Performance settings, and show preview retry only after failures.
 - [x] Exercise progressive comparison/wipe previews, native upgrades, CPU eviction and thumbnail resizing in the native renderer.
+
+- [x] Show capture date and exposure details in each viewer pane label without enlarging it.
+- [x] Stop zooming out at Fit, center on Fit, and clamp panning to the image so zooming out recenters it.
