@@ -57,6 +57,8 @@ The MTP CLI commands support Windows and Linux through the same device worker.
    to on: choosing a JPEG also chooses its matching RAF. Pairing uses exact stems
    within the same relative source folder. Ambiguous pairs are flagged and excluded
    from import; missing companions are reported in the import summary.
+   On Windows, photos protected (locked) on the camera start as **Keep** the first
+   time a camera folder is reviewed; saved choices always take precedence.
 3. Pin A and browse B. Use side-by-side, vertical wipe, or hold-to-blink comparison.
    Green/red/gray borders show Keep/Reject/Unreviewed in the viewer and filmstrip.
    **Settings > Review > Colourblind-friendly colours** switches decisions to

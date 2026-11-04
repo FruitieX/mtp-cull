@@ -135,7 +135,8 @@ impl Session {
                         kind: a.kind.into(),
                         size: a.size,
                         path: a.preview_path,
-                        decision: if a.kind == MtpMediaKind::Video {
+                        // Saved decisions restored later override these initial choices.
+                        decision: if a.kind == MtpMediaKind::Video || a.protected {
                             Decision::Keep
                         } else {
                             Decision::Unreviewed

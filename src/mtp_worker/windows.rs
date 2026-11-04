@@ -10,7 +10,9 @@ use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use winmtp::PortableDevices::{WPD_OBJECT_DATE_CREATED, WPD_OBJECT_DATE_MODIFIED, WPD_OBJECT_SIZE};
+use winmtp::PortableDevices::{
+    WPD_OBJECT_CAN_DELETE, WPD_OBJECT_DATE_CREATED, WPD_OBJECT_DATE_MODIFIED, WPD_OBJECT_SIZE,
+};
 use winmtp::Provider;
 use winmtp::device::{BasicDevice, Device};
 use winmtp::object::{Object, ObjectType};
@@ -587,8 +589,11 @@ fn collect_media(
                 WPD_OBJECT_SIZE,
                 WPD_OBJECT_DATE_MODIFIED,
                 WPD_OBJECT_DATE_CREATED,
+                WPD_OBJECT_CAN_DELETE,
             ])
             .wrap_err_with(|| format!("failed to read metadata for {name}"))?;
+        // WPD maps MTP ProtectionStatus (camera "protect" locks) to CanDelete.
+        let protected = matches!(metadata.get_bool(&WPD_OBJECT_CAN_DELETE), Ok(false));
         let modified = metadata
             .get_date(&WPD_OBJECT_DATE_MODIFIED)
             .or_else(|_| metadata.get_date(&WPD_OBJECT_DATE_CREATED))
@@ -613,6 +618,7 @@ fn collect_media(
                     source_path,
                     modified,
                     cache_key: String::new(),
+                    protected,
                 },
                 child,
             ));

@@ -143,6 +143,7 @@ mod tests {
             source_path: name.to_owned(),
             modified: None,
             cache_key: id.to_owned(),
+            protected: false,
         }
     }
 

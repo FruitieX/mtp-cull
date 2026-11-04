@@ -255,6 +255,7 @@ mod tests {
             source_path: "DCIM/a.JPG".into(),
             modified: Some("time".into()),
             cache_key: String::new(),
+            protected: false,
         };
         asset.cache_key = asset_key("camera", "folder", &asset, "one");
         assert_eq!(

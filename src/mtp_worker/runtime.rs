@@ -458,6 +458,7 @@ mod tests {
                             source_path: id.clone(),
                             modified: Some("stamp".into()),
                             cache_key: id,
+                            protected: false,
                         }],
                     }
                 })

@@ -672,6 +672,8 @@ async fn collect_media(
                     source_path,
                     modified,
                     cache_key: String::new(),
+                    // mtp-rs 0.32 parses ProtectionStatus but omits it from ObjectInfo.
+                    protected: false,
                 });
         }
     }

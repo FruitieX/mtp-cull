@@ -2864,6 +2864,74 @@ mod tests {
         assert!(app.import_open);
         assert!(!app.preset_from_review);
     }
+    #[test]
+    fn camera_locks_seed_keeps_only_until_the_review_is_saved() {
+        use crate::mtp_worker::{MtpMediaKind, RemoteAsset, RemoteSession, RemoteShot};
+        let remote = || RemoteSession {
+            device_id: "camera".into(),
+            source_folder_id: "folder".into(),
+            shots: ["locked", "open"]
+                .into_iter()
+                .map(|stem| RemoteShot {
+                    id: stem.into(),
+                    stem: stem.into(),
+                    assets: [("JPG", MtpMediaKind::Jpeg), ("RAF", MtpMediaKind::Raw)]
+                        .into_iter()
+                        .map(|(ext, kind)| RemoteAsset {
+                            object_id: format!("{stem}.{ext}"),
+                            name: format!("{stem}.{ext}"),
+                            kind,
+                            size: 1,
+                            preview_path: None,
+                            source_path: format!("DCIM/{stem}.{ext}"),
+                            modified: Some("stamp".into()),
+                            cache_key: format!("{stem}-{ext}"),
+                            protected: stem == "locked",
+                        })
+                        .collect(),
+                })
+                .collect(),
+        };
+        let root = tempfile::tempdir().unwrap();
+        let mut app = App::with_store(
+            Store::at(root.path().join("test.sqlite3")).unwrap(),
+            root.path().join("presets.json"),
+        )
+        .unwrap();
+        let decisions = |app: &App| {
+            app.session
+                .as_ref()
+                .unwrap()
+                .shots
+                .iter()
+                .map(|s| (s.decision(Kind::Jpeg, false), s.decision(Kind::Raw, false)))
+                .collect::<Vec<_>>()
+        };
+        app.install(Session::from_remote(remote()));
+        assert_eq!(
+            decisions(&app),
+            [
+                (Decision::Keep, Decision::Keep),
+                (Decision::Unreviewed, Decision::Unreviewed)
+            ]
+        );
+        // Reloading before any review is saved still shows the camera locks.
+        app.install(Session::from_remote(remote()));
+        assert_eq!(decisions(&app)[0], (Decision::Keep, Decision::Keep));
+        // A user override persists over the lock on later loads.
+        let linked = |app: &App| app.session.as_ref().unwrap().shots[0].decision(Kind::Raw, true);
+        app.selected = 0;
+        app.settings.link_raw = true;
+        app.command(Command::Clear);
+        app.install(Session::from_remote(remote()));
+        assert_eq!(decisions(&app)[0].0, Decision::Unreviewed);
+        assert_eq!(linked(&app), Decision::Unreviewed);
+        app.selected = 0;
+        app.command(Command::Reject);
+        app.install(Session::from_remote(remote()));
+        assert_eq!(decisions(&app)[0].0, Decision::Reject);
+        assert_eq!(linked(&app), Decision::Reject);
+    }
     fn fixture_app(root: &std::path::Path) -> App {
         let photos = root.join("photos");
         std::fs::create_dir_all(&photos).unwrap();

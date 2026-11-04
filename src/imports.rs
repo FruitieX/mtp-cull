@@ -49,6 +49,7 @@ pub fn start(assets: Vec<Asset>, destinations: ImportPaths) -> ImportOperation {
                         source_path: a.name.clone(),
                         modified: None,
                         cache_key: a.key.clone(),
+                        protected: false,
                     }],
                 })
                 .collect::<Vec<_>>();

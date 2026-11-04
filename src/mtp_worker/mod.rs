@@ -53,6 +53,9 @@ pub struct RemoteAsset {
     pub source_path: String,
     pub modified: Option<String>,
     pub cache_key: String,
+    /// Camera-side delete protection, such as a Fujifilm "protect" lock.
+    #[serde(default)]
+    pub protected: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
