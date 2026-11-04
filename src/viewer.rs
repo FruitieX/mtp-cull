@@ -390,7 +390,8 @@ impl Canvas {
                     egui::pos2(split - 8.0, rect.top()),
                     egui::pos2(split + 8.0, rect.bottom()),
                 );
-                let response = ui.interact(handle, ui.id().with("wipe-handle"), Sense::drag());
+                let response =
+                    ui.interact(handle, ui.scope_id().with("wipe-handle"), Sense::drag());
                 if response.dragged()
                     && let Some(pointer) = response.interact_pointer_pos()
                 {
@@ -489,7 +490,7 @@ impl Canvas {
         let dpi = ui.ctx().pixels_per_point();
         let response = ui.interact(
             clip,
-            ui.id()
+            ui.scope_id()
                 .with(("canvas-pane", b, rect.min.x.to_bits(), rect.min.y.to_bits())),
             Sense::click_and_drag(),
         );

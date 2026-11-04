@@ -31,7 +31,7 @@ if (-not $LicenseBundler) {
     else { $LicenseBundler = Join-Path $repo 'target/tools/license-bundler/bin/cargo-bundle-licenses.exe' }
 }
 if (-not (Test-Path -LiteralPath $LicenseBundler)) {
-    throw 'Install cargo-bundle-licenses 4.2.0 (see docs/windows-packaging.md), or pass -LicenseBundler.'
+    throw 'Install cargo-bundle-licenses 5.0.0 (see docs/windows-packaging.md), or pass -LicenseBundler.'
 }
 
 Push-Location $repo

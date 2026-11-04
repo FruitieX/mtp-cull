@@ -91,7 +91,7 @@ impl App {
                     let rect = layout.rect(position).translate(origin);
                     #[cfg(feature = "ui-smoke")]
                     self.reel_cells.push((index, rect));
-                    let response = ui.interact(rect, ui.id().with(("shot", index)), egui::Sense::click());
+                    let response = ui.interact(rect, ui.scope_id().with(("shot", index)), egui::Sense::click());
                     if response.clicked() {
                         let modifiers = ui.input(|i| i.modifiers);
                         chosen = Some((index, modifiers.command || modifiers.ctrl, modifiers.shift));
@@ -185,7 +185,7 @@ impl App {
                 }
             });
         self.reel_viewport = egui::Rect::from_min_size(
-            egui::Pos2::ZERO + result.state.offset,
+            egui::Pos2::ZERO + result.state.unclamped_offset(),
             result.inner_rect.size(),
         );
         self.reel_clip = result.inner_rect;

@@ -29,10 +29,10 @@
             pkgs.libxkbcommon
             pkgs.wayland
             pkgs.libGL
-            pkgs.xorg.libX11
-            pkgs.xorg.libXcursor
-            pkgs.xorg.libXrandr
-            pkgs.xorg.libXi
+            pkgs.libx11
+            pkgs.libxcursor
+            pkgs.libxrandr
+            pkgs.libxi
           ];
         in {
           default = rustPlatform.buildRustPackage {
@@ -64,10 +64,10 @@
               pkgs.libxkbcommon
               pkgs.wayland
               pkgs.libGL
-              pkgs.xorg.libX11
-              pkgs.xorg.libXcursor
-              pkgs.xorg.libXrandr
-              pkgs.xorg.libXi
+              pkgs.libx11
+              pkgs.libxcursor
+              pkgs.libxrandr
+              pkgs.libxi
             ];
           };
         });

@@ -10,7 +10,8 @@ use crate::safe_copy::{CopyOutcome, CopyWriter, copy_reader_verified};
 use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use futures::executor::block_on;
 use mtp_rs::{
-    MtpDevice as UsbMtpDevice, ObjectCollection, ObjectHandle, ObjectInfo, Storage, StorageId,
+    Error as MtpError, MtpDevice as UsbMtpDevice, ObjectCollection, ObjectHandle, ObjectInfo,
+    Storage, StorageId,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -552,25 +553,35 @@ fn open_device(id: &str) -> Result<UsbMtpDevice> {
         .wrap_err_with(|| format!("failed to open MTP device {id:?}"))
 }
 
-/// Preserve complete enumeration: mtp-rs 0.32's list_objects silently omits
+/// Preserve complete enumeration: mtp-rs's list_objects silently omits
 /// recoverable per-object metadata failures, which could hide photos from review.
 async fn list_objects_complete(
     storage: &Storage,
     parent: Option<ObjectHandle>,
 ) -> Result<Vec<ObjectInfo>> {
-    complete_objects(storage.collect_objects(parent).await?)
+    let ObjectCollection {
+        objects, skipped, ..
+    } = storage.collect_objects(parent).await?;
+    let skipped: Vec<_> = skipped
+        .into_iter()
+        .map(|skipped| (skipped.handle, skipped.error))
+        .collect();
+    complete_objects(objects, &skipped)
 }
 
-fn complete_objects(collection: ObjectCollection) -> Result<Vec<ObjectInfo>> {
-    if let Some(skipped) = collection.skipped.first() {
+fn complete_objects(
+    objects: Vec<ObjectInfo>,
+    skipped: &[(ObjectHandle, MtpError)],
+) -> Result<Vec<ObjectInfo>> {
+    if let Some((handle, error)) = skipped.first() {
         bail!(
             "incomplete MTP listing: {} objects could not be read; handle {}: {}",
-            collection.skipped.len(),
-            skipped.handle.0,
-            skipped.error
+            skipped.len(),
+            handle.0,
+            error
         );
     }
-    Ok(collection.objects)
+    Ok(objects)
 }
 
 async fn collect_source_folders(
@@ -792,17 +803,14 @@ async fn collect_legacy_media(
 #[cfg(test)]
 mod tests {
     use super::{complete_objects, device_id, folder_id, join_remote_path, parse_device_id};
-    use mtp_rs::{Error, ObjectCollection, ObjectHandle, ObjectInfo, SkippedObject, StorageId};
+    use mtp_rs::{Error, ObjectHandle, ObjectInfo, StorageId};
 
     #[test]
     fn incomplete_listing_does_not_silently_hide_unreadable_objects() {
-        let result = complete_objects(ObjectCollection {
-            objects: vec![ObjectInfo::default()],
-            skipped: vec![SkippedObject {
-                handle: ObjectHandle(42),
-                error: Error::AccessDenied,
-            }],
-        });
+        let result = complete_objects(
+            vec![ObjectInfo::default()],
+            &[(ObjectHandle(42), Error::AccessDenied)],
+        );
         let message = result.unwrap_err().to_string();
         assert!(message.contains("incomplete MTP listing"));
         assert!(message.contains("handle 42"));
@@ -812,21 +820,10 @@ mod tests {
     #[test]
     fn complete_listing_preserves_objects_and_accepts_empty_folders() {
         let object = ObjectInfo::default();
-        let objects = complete_objects(ObjectCollection {
-            objects: vec![object.clone()],
-            skipped: Vec::new(),
-        })
-        .unwrap();
+        let objects = complete_objects(vec![object.clone()], &[]).unwrap();
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0].handle, object.handle);
-        assert!(
-            complete_objects(ObjectCollection {
-                objects: Vec::new(),
-                skipped: Vec::new(),
-            })
-            .unwrap()
-            .is_empty()
-        );
+        assert!(complete_objects(Vec::new(), &[]).unwrap().is_empty());
     }
 
     #[test]

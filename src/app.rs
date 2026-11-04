@@ -2529,7 +2529,7 @@ impl eframe::App for App {
             let position = self.settings.reel_position;
             let side = position.is_side();
             // Left/right share a width; bottom keeps its own height and panel state.
-            let id = egui::Id::new(("filmstrip", side));
+            let id = egui::Id::unique(("filmstrip", side));
             let panel = match position {
                 Position::Bottom => egui::Panel::bottom(id)
                     .default_size(self.settings.reel_height)

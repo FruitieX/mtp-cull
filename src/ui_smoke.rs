@@ -2,6 +2,7 @@
 use super::*;
 use color_eyre::eyre::{bail, eyre};
 use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 const REEL_SHOTS: usize = 500;
 #[derive(Default)]
 struct ResizeProbe {
@@ -116,6 +117,10 @@ impl ResizeProbe {
         Ok(false)
     }
 }
+
+/// A named screenshot delivered by the integration after a capture request.
+type Screenshot = (String, Arc<egui::ColorImage>);
+
 pub(super) struct Smoke {
     pub blink: bool,
     pub input: Vec<egui::Event>,
@@ -125,6 +130,7 @@ pub(super) struct Smoke {
     started: Instant,
     waiting: Option<String>,
     received: BTreeSet<String>,
+    screenshots: Arc<Mutex<Vec<Screenshot>>>,
     samples: Vec<f64>,
     warm_uploads: u64,
     resize_probe: Option<ResizeProbe>,
@@ -268,6 +274,7 @@ impl Smoke {
             started: Instant::now(),
             waiting: None,
             received: BTreeSet::new(),
+            screenshots: Arc::default(),
             samples: Vec::new(),
             warm_uploads: 0,
             resize_probe: None,
@@ -283,9 +290,14 @@ impl Smoke {
     }
     fn capture(&mut self, ctx: &egui::Context, name: &str) {
         self.waiting = Some(name.into());
-        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(
-            name.to_owned(),
-        )));
+        let screenshots = Arc::clone(&self.screenshots);
+        let name = name.to_owned();
+        ctx.request_screenshot(move |image| {
+            screenshots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((name, image));
+        });
         self.frames = 0;
     }
     fn click(&mut self, pos: egui::Pos2, button: egui::PointerButton, modifiers: egui::Modifiers) {
@@ -596,6 +608,7 @@ impl Smoke {
                     egui::Event::MouseWheel {
                         unit: egui::MouseWheelUnit::Point,
                         phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Wheel,
                         delta: egui::vec2(0.0, -120.0),
                         modifiers: egui::Modifiers::NONE,
                     },
@@ -621,6 +634,7 @@ impl Smoke {
                     egui::Event::MouseWheel {
                         unit: egui::MouseWheelUnit::Point,
                         phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Wheel,
                         delta: egui::vec2(0.0, -120.0),
                         modifiers: egui::Modifiers::NONE,
                     },
@@ -743,6 +757,7 @@ impl Smoke {
                     egui::Event::MouseWheel {
                         unit: egui::MouseWheelUnit::Point,
                         phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Wheel,
                         delta: egui::vec2(0.0, -120.0),
                         modifiers: egui::Modifiers::NONE,
                     },
@@ -969,30 +984,26 @@ impl Smoke {
         if let Some(error) = &app.error {
             bail!("UI error at step {}: {error}", self.step);
         }
-        for event in ctx.input(|i| i.events.clone()) {
-            if let egui::Event::Screenshot {
-                user_data, image, ..
-            } = event
-            {
-                let name = user_data
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.downcast_ref::<String>())
-                    .ok_or_else(|| eyre!("missing screenshot name"))?;
-                let rgba = image
-                    .pixels
-                    .iter()
-                    .flat_map(|p| p.to_array())
-                    .collect::<Vec<_>>();
-                image::save_buffer(
-                    self.root.join(format!("{name}.png")),
-                    &rgba,
-                    image.size[0] as u32,
-                    image.size[1] as u32,
-                    image::ColorType::Rgba8,
-                )?;
-                self.received.insert(name.clone());
-            }
+        let screenshots = std::mem::take(
+            &mut *self
+                .screenshots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for (name, image) in screenshots {
+            let rgba = image
+                .pixels
+                .iter()
+                .flat_map(|p| p.to_array())
+                .collect::<Vec<_>>();
+            image::save_buffer(
+                self.root.join(format!("{name}.png")),
+                &rgba,
+                image.size[0] as u32,
+                image.size[1] as u32,
+                image::ColorType::Rgba8,
+            )?;
+            self.received.insert(name);
         }
         if self
             .waiting

@@ -36,7 +36,7 @@ build tools, CMake and NASM, as for `scripts/build-windows.ps1`. Additionally in
 [Inno Setup](https://jrsoftware.org/isinfo.php) 6.3+ or 7 and the license collector:
 
 ```powershell
-cargo install cargo-bundle-licenses --version 4.2.0 --locked
+cargo install cargo-bundle-licenses --version 5.0.0 --locked
 ./scripts/package-windows.ps1 -Test
 ./scripts/verify-windows-package.ps1
 ./scripts/test-windows-installer.ps1
