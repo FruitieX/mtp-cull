@@ -4,6 +4,18 @@ on:
   workflow_dispatch:
   push:
     tags: ['v*']
+  # Dependency updates can invalidate the version-specific license supplements,
+  # so package on pull requests that touch dependencies or packaging inputs.
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - build.rs
+      - rust-toolchain.toml
+      - assets/**
+      - packaging/**
+      - scripts/**
+      - .github/workflows/release.yml
 
 permissions:
   contents: read

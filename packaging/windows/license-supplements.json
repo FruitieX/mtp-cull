@@ -1,15 +1,14 @@
 {
   "sources": {
-    "AccessKit-accesskit-Apache-2.0.txt": "https://raw.githubusercontent.com/AccessKit/accesskit/1bbcf100942bac96c2c3a4a91cb67b0b20201a24/LICENSE-APACHE",
+    "AccessKit-accesskit-Apache-2.0.txt": "https://raw.githubusercontent.com/AccessKit/accesskit/f3026222559c7f5f46d8f25cb7404de68eb149f0/LICENSE-APACHE",
     "BLAKE3-team-BLAKE3-Apache-2.0.txt": "https://raw.githubusercontent.com/BLAKE3-team/BLAKE3/f3149ec5bb5449af877ba20377a11008ff499fa2/LICENSE_A2",
-    "DoumanAsh-clipboard-win-BSL-1.0.txt": "https://raw.githubusercontent.com/DoumanAsh/clipboard-win/3b27cf2bfd1adcfa6e0264eb51c1025ddaf0f342/LICENSE",
+    "DoumanAsh-clipboard-win-BSL-1.0.txt": "https://raw.githubusercontent.com/DoumanAsh/clipboard-win/ed27008ae5d1f10cfbb266de039f0fb35fd05a56/LICENSE",
     "cesarb-constant_time_eq-Apache-2.0.txt": "https://raw.githubusercontent.com/cesarb/constant_time_eq/86f38ed9ad4d0500c5472bb8cb2ddc4fe5ac7143/LICENSE-APACHE",
-    "knurling-rs-defmt-Apache-2.0.txt": "https://raw.githubusercontent.com/knurling-rs/defmt/4a8cdb44891ed57b8ff5a023b6bec7137c48708f/LICENSE-APACHE",
-    "emilk-egui-Apache-2.0.txt": "https://raw.githubusercontent.com/emilk/egui/49682f8baa058bf49e011035cfbd6e825f88a5ef/LICENSE-APACHE",
-    "egui-fonts-OFL.txt": "https://raw.githubusercontent.com/emilk/egui/49682f8baa058bf49e011035cfbd6e825f88a5ef/crates/epaint_default_fonts/fonts/OFL.txt",
-    "egui-fonts-UFL.txt": "https://raw.githubusercontent.com/emilk/egui/49682f8baa058bf49e011035cfbd6e825f88a5ef/crates/epaint_default_fonts/fonts/UFL.txt",
-    "egui-fonts-Hack-Regular.txt": "https://raw.githubusercontent.com/emilk/egui/49682f8baa058bf49e011035cfbd6e825f88a5ef/crates/epaint_default_fonts/fonts/Hack-Regular.txt",
-    "egui-fonts-emoji-icon-font-mit-license.txt": "https://raw.githubusercontent.com/emilk/egui/49682f8baa058bf49e011035cfbd6e825f88a5ef/crates/epaint_default_fonts/fonts/emoji-icon-font-mit-license.txt",
+    "emilk-egui-Apache-2.0.txt": "https://raw.githubusercontent.com/emilk/egui/841a328ba2dd8f6996beb7189ebb7fc00e668a2a/LICENSE-APACHE",
+    "egui-fonts-OFL.txt": "https://raw.githubusercontent.com/emilk/egui/841a328ba2dd8f6996beb7189ebb7fc00e668a2a/crates/epaint_default_fonts/fonts/OFL.txt",
+    "egui-fonts-UFL.txt": "https://raw.githubusercontent.com/emilk/egui/841a328ba2dd8f6996beb7189ebb7fc00e668a2a/crates/epaint_default_fonts/fonts/UFL.txt",
+    "egui-fonts-Hack-Regular.txt": "https://raw.githubusercontent.com/emilk/egui/841a328ba2dd8f6996beb7189ebb7fc00e668a2a/crates/epaint_default_fonts/fonts/Hack-Regular.txt",
+    "egui-fonts-emoji-icon-font-mit-license.txt": "https://raw.githubusercontent.com/emilk/egui/841a328ba2dd8f6996beb7189ebb7fc00e668a2a/crates/epaint_default_fonts/fonts/emoji-icon-font-mit-license.txt",
     "aclysma-profiling-Apache-2.0.txt": "https://raw.githubusercontent.com/aclysma/profiling/8271551172eb6fa4cba47369aedd93790c623df9/LICENSE-APACHE",
     "Voultapher-self_cell-Apache-2.0.txt": "https://raw.githubusercontent.com/Voultapher/self_cell/93cb06e430e7516ac9b436029a15127782b6c2b6/LICENSE-APACHE",
     "gfx-rs-rspirv-Apache-2.0.txt": "https://raw.githubusercontent.com/gfx-rs/rspirv/8afc3d0ac8e158128cd1410bb2e4b4c26ab11bb4/LICENSE",
@@ -18,7 +17,7 @@
   "packages": [
     {
       "package_name": "accesskit",
-      "package_version": "0.24.1",
+      "package_version": "0.25.2",
       "license": "Apache-2.0",
       "licenses": [
         {
@@ -29,7 +28,7 @@
     },
     {
       "package_name": "accesskit_consumer",
-      "package_version": "0.35.0",
+      "package_version": "0.39.2",
       "license": "Apache-2.0",
       "licenses": [
         {
@@ -40,7 +39,7 @@
     },
     {
       "package_name": "accesskit_windows",
-      "package_version": "0.32.1",
+      "package_version": "0.35.2",
       "license": "Apache-2.0",
       "licenses": [
         {
@@ -51,7 +50,7 @@
     },
     {
       "package_name": "accesskit_winit",
-      "package_version": "0.32.2",
+      "package_version": "0.34.2",
       "license": "Apache-2.0",
       "licenses": [
         {
@@ -73,7 +72,7 @@
     },
     {
       "package_name": "clipboard-win",
-      "package_version": "5.4.1",
+      "package_version": "5.4.3",
       "license": "BSL-1.0",
       "licenses": [
         {
@@ -94,19 +93,8 @@
       ]
     },
     {
-      "package_name": "defmt-parser",
-      "package_version": "1.0.0",
-      "license": "Apache-2.0",
-      "licenses": [
-        {
-          "license": "Apache-2.0",
-          "file": "knurling-rs-defmt-Apache-2.0.txt"
-        }
-      ]
-    },
-    {
       "package_name": "ecolor",
-      "package_version": "0.36.2",
+      "package_version": "0.37.0",
       "license": "Apache-2.0",
       "licenses": [
         {
@@ -117,7 +105,7 @@
     },
     {
       "package_name": "eframe",
-      "package_version": "0.36.2",
+      "package_version": "0.37.0",
       "license": "Apache-2.0",
       "licenses": [
         {
@@ -128,7 +116,7 @@
     },
     {
       "package_name": "egui",
-      "package_version": "0.36.2",
+      "package_version": "0.37.0",
       "license": "Apache-2.0",
       "licenses": [
         {
@@ -139,7 +127,7 @@
     },
     {
       "package_name": "egui-wgpu",
-      "package_version": "0.36.2",
+      "package_version": "0.37.0",
       "license": "Apache-2.0",
       "licenses": [
         {
@@ -150,7 +138,7 @@
     },
     {
       "package_name": "egui-winit",
-      "package_version": "0.36.2",
+      "package_version": "0.37.0",
       "license": "Apache-2.0",
       "licenses": [
         {
@@ -161,7 +149,18 @@
     },
     {
       "package_name": "egui_glow",
-      "package_version": "0.36.2",
+      "package_version": "0.37.0",
+      "license": "Apache-2.0",
+      "licenses": [
+        {
+          "license": "Apache-2.0",
+          "file": "emilk-egui-Apache-2.0.txt"
+        }
+      ]
+    },
+    {
+      "package_name": "egui_system_font_provider",
+      "package_version": "0.37.0",
       "license": "Apache-2.0",
       "licenses": [
         {
@@ -172,7 +171,7 @@
     },
     {
       "package_name": "emath",
-      "package_version": "0.36.2",
+      "package_version": "0.37.0",
       "license": "Apache-2.0",
       "licenses": [
         {
@@ -183,7 +182,7 @@
     },
     {
       "package_name": "epaint",
-      "package_version": "0.36.2",
+      "package_version": "0.37.0",
       "license": "Apache-2.0",
       "licenses": [
         {
@@ -194,7 +193,7 @@
     },
     {
       "package_name": "epaint_default_fonts",
-      "package_version": "0.36.2",
+      "package_version": "0.37.0",
       "license": "Apache-2.0 AND OFL-1.1 AND Ubuntu-font-1.0",
       "licenses": [
         {

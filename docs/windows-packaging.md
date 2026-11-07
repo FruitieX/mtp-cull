@@ -92,7 +92,9 @@ supplements against the actual upstream version.
 ## Release automation and remaining validation
 
 The **Windows packages** GitHub Actions workflow can be run manually to produce
-downloadable artifacts. Pushing a tag such as `v0.1.0` requires the matching Cargo
+downloadable artifacts. It also runs on pull requests that change dependencies or
+packaging inputs, so a dependency update that needs new license supplements fails
+before it merges. Pushing a tag such as `v0.1.0` requires the matching Cargo
 version and also creates a **draft** GitHub release with the tested packages.
 Published releases are never overwritten by this workflow. Publishing the draft
 is a separate action; no release or tag is created by the local packaging script.
