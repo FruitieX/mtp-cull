@@ -1,7 +1,7 @@
 # Direct camera review and import
 
 `app.rs` communicates with a dedicated worker through `MtpRequest`/`MtpEvent`.
-Windows Portable Devices and Linux `mtp-rs 0.37.3` handles stay on that worker
+Windows Portable Devices and Linux `mtp-rs 0.38.0` handles stay on that worker
 thread. The UI never opens camera streams or invokes camera writes/deletes.
 
 ## Index and staging

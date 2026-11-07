@@ -10,8 +10,8 @@ use crate::safe_copy::{CopyOutcome, CopyWriter, copy_reader_verified};
 use color_eyre::eyre::{Result, WrapErr, bail, eyre};
 use futures::executor::block_on;
 use mtp_rs::{
-    Error as MtpError, MtpDevice as UsbMtpDevice, ObjectCollection, ObjectHandle, ObjectInfo,
-    Storage, StorageId,
+    ByteRange, Error as MtpError, MtpDevice as UsbMtpDevice, ObjectCollection, ObjectHandle,
+    ObjectInfo, Storage, StorageId,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -701,13 +701,13 @@ async fn copy_windowed_no_clobber(
 ) -> Result<(CopyOutcome, String)> {
     progress(0)?;
     let mut download = storage
-        .download_windowed_default(handle)
+        .download(handle, ByteRange::Full)
         .await
         .wrap_err_with(|| format!("failed to read {source_label}"))?;
     let mut writer = CopyWriter::new(expected_size, target_path, source_label)?;
     let mut copied = 0;
-    while let Some(window) = download.next_window().await {
-        let bytes = window.wrap_err_with(|| format!("failed to read {source_label}"))?;
+    while let Some(chunk) = download.next_chunk().await {
+        let bytes = chunk.wrap_err_with(|| format!("failed to read {source_label}"))?;
         writer.write(&bytes)?;
         copied += bytes.len() as u64;
         progress(copied)?;
