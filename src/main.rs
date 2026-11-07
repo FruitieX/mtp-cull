@@ -10,7 +10,17 @@ mod image_cache;
 mod import_presets;
 mod imports;
 mod mipmaps;
+// Direct MTP backends exist only on Windows and Linux. Elsewhere the worker is
+// a stub, so the backend-facing types and helpers are intentionally unused.
+#[cfg_attr(
+    not(any(windows, target_os = "linux")),
+    expect(dead_code, reason = "no direct MTP backend on this platform")
+)]
 mod mtp_file;
+#[cfg_attr(
+    not(any(windows, target_os = "linux")),
+    expect(dead_code, reason = "no direct MTP backend on this platform")
+)]
 mod mtp_worker;
 #[cfg(test)]
 mod performance;
