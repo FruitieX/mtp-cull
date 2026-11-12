@@ -45,4 +45,4 @@ winmtp = "=0.3.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 futures = "=0.3.34"
-mtp-rs = "=0.38.0"
+mtp-rs = "=0.38.1"
